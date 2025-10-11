@@ -1,0 +1,335 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== ENUMS ====================
+
+enum CampaignStatus {
+  DRAFT       // Rascunho, em criação
+  SCHEDULED   // Agendada para envio futuro
+  PROCESSING  // Em processamento/enviando
+  COMPLETED   // Completada com sucesso
+  PAUSED      // Pausada manualmente
+  CANCELED    // Cancelada
+  FAILED      // Falhou
+}
+
+enum MessageStatus {
+  PENDING     // Aguardando envio
+  QUEUED      // Na fila de envio
+  SENT        // Enviada com sucesso
+  DELIVERED   // Entregue ao destinatário
+  READ        // Lida pelo destinatário
+  FAILED      // Falha no envio
+  REJECTED    // Rejeitada pela API
+}
+
+enum TemplateStatus {
+  DRAFT       // Rascunho
+  PENDING     // Aguardando aprovação do WhatsApp
+  APPROVED    // Aprovado pelo WhatsApp
+  REJECTED    // Rejeitado pelo WhatsApp
+  DISABLED    // Desabilitado
+}
+
+enum TemplateCategory {
+  MARKETING           // Campanhas de marketing
+  UTILITY             // Mensagens utilitárias (confirmações, atualizações)
+  AUTHENTICATION      // Códigos de autenticação
+}
+
+enum ComponentType {
+  HEADER      // Cabeçalho (texto, imagem, vídeo, documento)
+  BODY        // Corpo da mensagem
+  FOOTER      // Rodapé
+  BUTTONS     // Botões (call-to-action, quick reply)
+}
+
+enum ButtonType {
+  QUICK_REPLY     // Resposta rápida
+  URL             // Link externo
+  PHONE_NUMBER    // Número de telefone
+}
+
+enum HeaderFormat {
+  TEXT
+  IMAGE
+  VIDEO
+  DOCUMENT
+}
+
+// ==================== MODELS ====================
+
+// Template de mensagem do WhatsApp
+model MessageTemplate {
+  id          String            @id @default(uuid())
+  name        String            // Nome único do template
+  language    String            // Código do idioma (pt_BR, en_US, es_ES)
+  category    TemplateCategory  @default(MARKETING)
+  status      TemplateStatus    @default(DRAFT)
+  
+  // Identificador do template no WhatsApp Business API
+  whatsappTemplateId  String?   @unique
+  
+  // Componentes do template
+  components  TemplateComponent[]
+  
+  // Metadados
+  description String?
+  tags        String[]          // Tags para organização
+  
+  // Controle
+  isActive    Boolean           @default(true)
+  deletedAt   DateTime?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  
+  @@unique([name, language])
+  @@index([status])
+  @@index([category])
+  @@map("message_templates")
+}
+
+// Componentes do template (header, body, footer, buttons)
+model TemplateComponent {
+  id              String              @id @default(uuid())
+  templateId      String
+  template        MessageTemplate     @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  
+  type            ComponentType
+  format          HeaderFormat?       // Apenas para HEADER
+  
+  // Conteúdo
+  text            String?             // Texto do componente
+  example         Json?               // Exemplos de variáveis para aprovação
+  
+  // Para componentes de botão
+  buttons         TemplateButton[]
+  
+  // Ordem de exibição
+  order           Int                 @default(0)
+  
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  
+  @@index([templateId])
+  @@map("template_components")
+}
+
+// Botões do template
+model TemplateButton {
+  id            String            @id @default(uuid())
+  componentId   String
+  component     TemplateComponent @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  
+  type          ButtonType
+  text          String            // Texto do botão
+  
+  // Para URL buttons
+  url           String?           // URL do botão (pode conter variáveis {{1}})
+  
+  // Para phone buttons
+  phoneNumber   String?           // Número de telefone
+  
+  // Ordem
+  order         Int               @default(0)
+  
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  
+  @@index([componentId])
+  @@map("template_buttons")
+}
+
+// Campanha de broadcast
+model Campaign {
+  id              String          @id @default(uuid())
+  name            String          // Nome da campanha
+  description     String?
+  status          CampaignStatus  @default(DRAFT)
+  
+  // Template ID (identificador externo do template)
+  templateId      String          // ID do template usado nesta campanha
+  
+  // Template completo armazenado em JSON
+  templateData    Json            // Dados completos do template
+  
+  // Canal (pode ser usado para múltiplos números de WhatsApp Business)
+  channel         String
+  phoneNumberId   String?         // ID do número de telefone no WhatsApp Business API
+  
+  // Agendamento
+  scheduledAt     DateTime?       // Quando deve iniciar
+  startedAt       DateTime?       // Quando realmente iniciou
+  completedAt     DateTime?       // Quando foi completada
+  
+  // Configurações de envio
+  batchSize       Int             @default(100)   // Quantidade de mensagens por lote
+  delayBetweenBatches Int         @default(5000)  // Delay em ms entre lotes
+  
+  // Destinatários
+  recipients      CampaignRecipient[]
+  
+  // Mensagens enviadas
+  messages        Message[]
+  
+  // Estatísticas (desnormalizadas para performance)
+  totalRecipients   Int           @default(0)
+  sentCount         Int           @default(0)
+  deliveredCount    Int           @default(0)
+  readCount         Int           @default(0)
+  failedCount       Int           @default(0)
+  
+  // Metadados
+  tags            String[]
+  metadata        Json?           // Dados adicionais customizados
+  
+  // Controle
+  deletedAt       DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  
+  @@index([status])
+  @@index([scheduledAt])
+  @@index([createdAt])
+  @@map("campaigns")
+}
+
+// Destinatários de uma campanha
+model CampaignRecipient {
+  id              String      @id @default(uuid())
+  campaignId      String
+  campaign        Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  
+  // Dados do destinatário
+  phoneNumber     String      // Número no formato internacional (5511999999999)
+  name            String?     // Nome do contato
+  email           String?     // Email (para tracking adicional)
+  
+  // Status do envio
+  status          MessageStatus @default(PENDING)
+  sentAt          DateTime?     // Quando foi enviado
+  deliveredAt     DateTime?     // Quando foi entregue
+  readAt          DateTime?     // Quando foi lido
+  
+  // Variáveis personalizadas para este destinatário
+  // Exemplo: {"1": "João", "2": "Premium", "3": "50"}
+  variables       Json?       // Mapa de variáveis para substituição no template
+  
+  // Metadados adicionais
+  metadata        Json?       // Campos extras (tags, segmentação, etc)
+  
+  // Controle
+  isActive        Boolean     @default(true)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  
+  // Mensagens enviadas para este destinatário
+  messages        Message[]
+  
+  @@unique([campaignId, phoneNumber])
+  @@index([campaignId])
+  @@index([phoneNumber])
+  @@map("campaign_recipients")
+}
+
+// Mensagem individual enviada
+model Message {
+  id                String        @id @default(uuid())
+  campaignId        String
+  campaign          Campaign      @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  
+  recipientId       String
+  recipient         CampaignRecipient @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  
+  // Dados do envio
+  phoneNumber       String        // Número do destinatário
+  status            MessageStatus @default(PENDING)
+  
+  // ID externo do Diogenes/WhatsApp
+  externalId        String?       @unique // ID retornado pelo Diogenes (wamid.xxx)
+  
+  // IDs do WhatsApp
+  whatsappMessageId String?       @unique // ID retornado pela API do WhatsApp
+  wabaId            String?       // WhatsApp Business Account ID
+  templateId        String?       // ID do template usado
+  
+  // Conteúdo processado (com variáveis substituídas)
+  processedContent  Json?         // Conteúdo final enviado
+  
+  // Timestamps de status
+  queuedAt          DateTime?     // Quando entrou na fila
+  sentAt            DateTime?     // Quando foi enviado
+  deliveredAt       DateTime?     // Quando foi entregue
+  readAt            DateTime?     // Quando foi lido
+  failedAt          DateTime?     // Quando falhou
+  
+  // Erro (se houver)
+  errorCode         String?
+  errorMessage      String?
+  errorDetails      Json?
+  
+  // Tentativas de reenvio
+  retryCount        Int           @default(0)
+  maxRetries        Int           @default(3)
+  
+  // Webhooks recebidos
+  webhookEvents     WebhookEvent[]
+  
+  // Metadados
+  metadata          Json?
+  
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  
+  @@index([campaignId])
+  @@index([recipientId])
+  @@index([status])
+  @@index([whatsappMessageId])
+  @@index([sentAt])
+  @@map("messages")
+}
+
+// Eventos de webhook do WhatsApp
+model WebhookEvent {
+  id              String        @id @default(uuid())
+  messageId       String?
+  message         Message?      @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  
+  // Provedor do webhook (diogenes, whatsapp, etc)
+  provider        String        @default("diogenes")
+  
+  // Dados do webhook
+  event           String        @default("unknown") // messages.upsert, messages.update, etc
+  eventType       String?       // message_status, message_template_status_update, etc
+  whatsappMessageId String?     // ID da mensagem no WhatsApp
+  
+  status          String?       // sent, delivered, read, failed
+  timestamp       DateTime      @default(now()) // Timestamp do evento
+  
+  // Payload completo do webhook
+  payload         Json
+  
+  // Controle
+  processed       Boolean       @default(false)
+  processedAt     DateTime?
+  
+  createdAt       DateTime      @default(now())
+  
+  @@index([messageId])
+  @@index([whatsappMessageId])
+  @@index([eventType])
+  @@index([timestamp])
+  @@map("webhook_events")
+}

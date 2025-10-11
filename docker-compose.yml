@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: beecrm-postgres
+    restart: unless-stopped
+    ports:
+      - '5432:5432'
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: beecrm
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - beecrm-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: beecrm-redis
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    networks:
+      - beecrm-network
+
+  minio:
+    image: minio/minio:latest
+    container_name: beecrm-minio
+    restart: unless-stopped
+    ports:
+      # - '9000:9000'
+      - '9010:9001'
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9010"
+    networks:
+      - beecrm-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+
+networks:
+  beecrm-network:
+    driver: bridge

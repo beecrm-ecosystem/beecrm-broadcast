@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Métricas em Tempo Real - Broadcast</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .metric-card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+
+        .metric-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.3);
+        }
+
+        .metric-card h3 {
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 1.2em;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+
+        .metric-value {
+            font-size: 3em;
+            font-weight: bold;
+            color: #333;
+            margin: 15px 0;
+        }
+
+        .metric-label {
+            color: #666;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 30px;
+            background: #f0f0f0;
+            border-radius: 15px;
+            overflow: hidden;
+            margin: 15px 0;
+            position: relative;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            transition: width 0.5s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+        }
+
+        .campaign-list {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+
+        .campaign-item {
+            border-bottom: 1px solid #eee;
+            padding: 15px 0;
+        }
+
+        .campaign-item:last-child {
+            border-bottom: none;
+        }
+
+        .campaign-name {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+        }
+
+        .campaign-status {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            font-weight: bold;
+            margin-right: 10px;
+        }
+
+        .status-PROCESSING {
+            background: #ffc107;
+            color: #000;
+        }
+
+        .status-COMPLETED {
+            background: #4caf50;
+            color: white;
+        }
+
+        .status-SCHEDULED {
+            background: #2196f3;
+            color: white;
+        }
+
+        .status-DRAFT {
+            background: #9e9e9e;
+            color: white;
+        }
+
+        .status-FAILED {
+            background: #f44336;
+            color: white;
+        }
+
+        .campaign-stats {
+            display: flex;
+            gap: 20px;
+            margin-top: 10px;
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .stat {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .stat-icon {
+            font-size: 1.2em;
+        }
+
+        .refresh-info {
+            background: rgba(255,255,255,0.2);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 10px;
+            text-align: center;
+            margin-bottom: 20px;
+            backdrop-filter: blur(10px);
+        }
+
+        .loading {
+            text-align: center;
+            color: white;
+            font-size: 1.5em;
+            padding: 50px;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .loading::after {
+            content: '...';
+            animation: pulse 1.5s infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📊 Métricas de Broadcast em Tempo Real</h1>
+        
+        <div class="refresh-info">
+            🔄 Atualização automática a cada 5 segundos
+        </div>
+
+        <div id="overview-metrics" class="metrics-grid">
+            <div class="loading">Carregando métricas</div>
+        </div>
+
+        <div id="active-campaigns" class="campaign-list">
+            <h3>📡 Campanhas Ativas</h3>
+            <div id="campaigns-container">
+                <div class="loading">Carregando campanhas</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:3000/api';
+        const REFRESH_INTERVAL = 5000; // 5 segundos
+
+        // Função para buscar métricas gerais
+        async function fetchOverviewMetrics() {
+            try {
+                const response = await fetch(`${API_BASE}/metrics/overview`);
+                const data = await response.json();
+                renderOverviewMetrics(data);
+            } catch (error) {
+                console.error('Erro ao buscar métricas:', error);
+            }
+        }
+
+        // Função para buscar campanhas ativas
+        async function fetchActiveCampaigns() {
+            try {
+                const response = await fetch(`${API_BASE}/metrics/active`);
+                const data = await response.json();
+                renderActiveCampaigns(data);
+            } catch (error) {
+                console.error('Erro ao buscar campanhas:', error);
+            }
+        }
+
+        // Renderiza métricas gerais
+        function renderOverviewMetrics(data) {
+            const container = document.getElementById('overview-metrics');
+            
+            container.innerHTML = `
+                <div class="metric-card">
+                    <h3>Total de Campanhas</h3>
+                    <div class="metric-value">${data.total}</div>
+                    <div class="metric-label">Campanhas Criadas</div>
+                </div>
+
+                <div class="metric-card">
+                    <h3>Mensagens Enviadas</h3>
+                    <div class="metric-value">${data.sentMessages.toLocaleString()}</div>
+                    <div class="metric-label">De ${data.totalMessages.toLocaleString()} Total</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${data.successRate}%">
+                            ${data.successRate}%
+                        </div>
+                    </div>
+                </div>
+
+                <div class="metric-card">
+                    <h3>Taxa de Entrega</h3>
+                    <div class="metric-value">${data.deliveryRate}%</div>
+                    <div class="metric-label">${data.deliveredMessages.toLocaleString()} Entregues</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${data.deliveryRate}%">
+                            ${data.deliveryRate}%
+                        </div>
+                    </div>
+                </div>
+
+                <div class="metric-card">
+                    <h3>Taxa de Leitura</h3>
+                    <div class="metric-value">${data.readRate}%</div>
+                    <div class="metric-label">${data.readMessages.toLocaleString()} Lidas</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${data.readRate}%">
+                            ${data.readRate}%
+                        </div>
+                    </div>
+                </div>
+
+                <div class="metric-card">
+                    <h3>Mensagens Falhadas</h3>
+                    <div class="metric-value" style="color: #f44336;">${data.failedMessages}</div>
+                    <div class="metric-label">Taxa de Falha: ${((data.failedMessages / data.totalMessages) * 100).toFixed(2)}%</div>
+                </div>
+
+                <div class="metric-card">
+                    <h3>Status das Campanhas</h3>
+                    <div style="margin-top: 15px;">
+                        ${Object.entries(data.byStatus || {}).map(([status, count]) => `
+                            <div style="display: flex; justify-content: space-between; margin: 10px 0;">
+                                <span class="campaign-status status-${status}">${status}</span>
+                                <strong>${count}</strong>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+        }
+
+        // Renderiza campanhas ativas
+        function renderActiveCampaigns(campaigns) {
+            const container = document.getElementById('campaigns-container');
+            
+            if (campaigns.length === 0) {
+                container.innerHTML = '<p style="text-align: center; color: #999;">Nenhuma campanha ativa no momento</p>';
+                return;
+            }
+
+            container.innerHTML = campaigns.map(campaign => `
+                <div class="campaign-item">
+                    <div class="campaign-name">${campaign.name}</div>
+                    <div>
+                        <span class="campaign-status status-${campaign.status}">${campaign.status}</span>
+                        <span style="color: #999; font-size: 0.9em;">ID: ${campaign.campaignId}</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${campaign.progress}%">
+                            ${campaign.progress}%
+                        </div>
+                    </div>
+                    <div class="campaign-stats">
+                        <div class="stat">
+                            <span class="stat-icon">📤</span>
+                            <span>${campaign.sentCount}/${campaign.totalRecipients} enviadas</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-icon">✅</span>
+                            <span>${campaign.deliveredCount} entregues</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-icon">👁️</span>
+                            <span>${campaign.readCount} lidas</span>
+                        </div>
+                        <div class="stat" style="color: #f44336;">
+                            <span class="stat-icon">❌</span>
+                            <span>${campaign.failedCount} falhas</span>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // Atualiza tudo
+        function updateAll() {
+            fetchOverviewMetrics();
+            fetchActiveCampaigns();
+        }
+
+        // Inicia
+        updateAll();
+        setInterval(updateAll, REFRESH_INTERVAL);
+
+        console.log('🚀 Dashboard de métricas iniciado!');
+        console.log(`📊 Atualizando a cada ${REFRESH_INTERVAL / 1000} segundos`);
+    </script>
+</body>
+</html>

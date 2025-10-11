@@ -1,0 +1,264 @@
+================================================================================
+          DOCUMENTAÇÃO - WEBHOOK DE ATUALIZAÇÃO DE CAMPANHAS
+================================================================================
+
+ENDPOINT: POST /api/v1/webhooks/campaign-webhook
+
+DESCRIÇÃO:
+Este endpoint permite atualizar o status de campanhas e informações sobre
+contatos através de webhooks externos.
+
+================================================================================
+AUTENTICAÇÃO:
+O endpoint está sob o prefixo 'v1' que requer autenticação via API token.
+
+================================================================================
+EVENTOS SUPORTADOS:
+
+1. EVENT: "broadcast:statusUpdate"
+   - Atualiza o status da campanha com base nos detalhes do broadcast
+
+2. EVENT: "update_status"
+   - Atualização simplificada de status da campanha
+
+================================================================================
+FORMATO DA REQUISIÇÃO:
+
+--------------------------------------------------------------------------------
+EVENTO 1: broadcast:statusUpdate
+--------------------------------------------------------------------------------
+
+POST /api/v1/webhooks/campaign-webhook
+Content-Type: application/json
+
+{
+  "event": "broadcast:statusUpdate",
+  "link": "https://url-do-relatorio.com",  // OPCIONAL
+  "data": {
+    "broadcastId": "ID_EXTERNO_DA_CAMPANHA",
+    "details": {
+      "status": 1,                     // OPCIONAL - Status da campanha (ver tabela abaixo)
+      "error": "Mensagem de erro",     // OPCIONAL - Se presente, marca campanha como FAILED
+      "totalContacts": 150,            // OPCIONAL - Total de contatos com sucesso
+      "failedContacts": 10             // OPCIONAL - Total de contatos que falharam
+    }
+  }
+}
+
+COMPORTAMENTO:
+- Localiza a campanha pelo campo 'external_id' correspondente ao 'broadcastId'
+- Se 'link' for enviado, atualiza o campo 'report_link'
+- Se 'details.error' existir, marca a campanha como STATUS_FAILED (6)
+- Se 'details.status' existir, atualiza o 'status_key' com o valor fornecido
+- Se 'totalContacts' OU 'failedContacts' existirem, calcula e atualiza 'leads_count':
+  leads_count = totalContacts + failedContacts
+
+EXEMPLO COMPLETO:
+{
+  "event": "broadcast:statusUpdate",
+  "link": "https://relatorio.exemplo.com/campanha-123",
+  "data": {
+    "broadcastId": "abc123xyz789",
+    "details": {
+      "status": 5,
+      "totalContacts": 450,
+      "failedContacts": 50
+    }
+  }
+}
+
+EXEMPLO COM ERRO:
+{
+  "event": "broadcast:statusUpdate",
+  "data": {
+    "broadcastId": "abc123xyz789",
+    "details": {
+      "error": "Falha ao processar mensagens - quota excedida"
+    }
+  }
+}
+
+--------------------------------------------------------------------------------
+EVENTO 2: update_status
+--------------------------------------------------------------------------------
+
+POST /api/v1/webhooks/campaign-webhook
+Content-Type: application/json
+
+{
+  "event": "update_status",
+  "broadcastId": "ID_EXTERNO_DA_CAMPANHA",
+  "status": 1,                        // Status da campanha (ver tabela abaixo)
+  "link": "https://url-do-relatorio.com"  // OPCIONAL
+}
+
+COMPORTAMENTO:
+- Localiza a campanha pelo campo 'external_id' correspondente ao 'broadcastId'
+- Se 'link' for enviado, atualiza o campo 'report_link'
+- Atualiza o 'status_key' com o valor fornecido em 'status'
+- Retorna resposta JSON com mensagem de sucesso ou erro
+
+RESPOSTA DE SUCESSO (200):
+{
+  "message": "Campaign has been updated."
+}
+
+RESPOSTA DE ERRO (404):
+{
+  "message": "Campaign not found."
+}
+
+EXEMPLO:
+{
+  "event": "update_status",
+  "broadcastId": "abc123xyz789",
+  "status": 1,
+  "link": "https://relatorio.exemplo.com/campanha-123"
+}
+
+================================================================================
+TABELA DE STATUS (status_key):
+
++-------+------------------+------------------------------------------+
+| Valor | Constante        | Descrição                                |
++-------+------------------+------------------------------------------+
+|   0   | STATUS_PENDING   | Campanha pendente de processamento      |
+|   1   | STATUS_DONE      | Campanha concluída com sucesso          |
+|   2   | STATUS_TO_SEND   | Campanha pronta para ser enviada        |
+|   3   | STATUS_STOPPED   | Campanha interrompida/pausada           |
+|   4   | STATUS_SCHEDULED | Campanha agendada para envio futuro     |
+|   5   | STATUS_SENDING   | Campanha em processo de envio           |
+|   6   | STATUS_FAILED    | Campanha falhou durante o processamento |
+|   7   | STATUS_DELETED   | Campanha excluída                       |
++-------+------------------+------------------------------------------+
+
+================================================================================
+ATUALIZAÇÃO DA LISTA DE CONTATOS:
+
+Para atualizar o total de contatos da campanha, use o evento "broadcast:statusUpdate"
+com os campos 'totalContacts' e/ou 'failedContacts':
+
+FÓRMULA: leads_count = totalContacts + failedContacts
+
+IMPORTANTE:
+- Pelo menos um dos campos (totalContacts ou failedContacts) deve ser enviado
+- Se apenas um for enviado, o outro será considerado como 0
+- O campo 'leads_count' armazena o total geral de contatos da campanha
+
+EXEMPLO - Campanha com 450 sucessos e 50 falhas:
+{
+  "event": "broadcast:statusUpdate",
+  "data": {
+    "broadcastId": "abc123xyz789",
+    "details": {
+      "status": 1,
+      "totalContacts": 450,
+      "failedContacts": 50
+    }
+  }
+}
+// Resultado: leads_count = 500
+
+EXEMPLO - Apenas contatos com sucesso:
+{
+  "event": "broadcast:statusUpdate",
+  "data": {
+    "broadcastId": "abc123xyz789",
+    "details": {
+      "totalContacts": 300
+    }
+  }
+}
+// Resultado: leads_count = 300
+
+================================================================================
+LOGS:
+
+Todas as requisições são registradas no log com a tag 'webhook-campaign'.
+Para debug, verifique os logs do Laravel:
+storage/logs/laravel.log
+
+================================================================================
+REQUISITOS TÉCNICOS:
+
+- Método HTTP: POST
+- Content-Type: application/json
+- Autenticação: Bearer Token (API v1)
+- Encoding: UTF-8
+
+================================================================================
+NOTAS IMPORTANTES:
+
+1. O campo 'external_id' na tabela de campanhas deve corresponder ao
+   'broadcastId' enviado no webhook
+
+2. Se a campanha não for encontrada no evento "broadcast:statusUpdate",
+   uma exceção será lançada
+
+3. O evento "update_status" retorna 404 se a campanha não for encontrada
+
+4. O campo 'report_link' é sempre opcional e preserva o valor anterior
+   se não for enviado
+
+5. Campos opcionais podem ser omitidos completamente do JSON
+
+================================================================================
+EXEMPLOS DE USO COMPLETOS:
+
+--------------------------------------------------------------------------------
+CASO 1: Iniciar envio de campanha
+--------------------------------------------------------------------------------
+{
+  "event": "update_status",
+  "broadcastId": "campanha-2024-001",
+  "status": 5
+}
+
+--------------------------------------------------------------------------------
+CASO 2: Finalizar campanha com sucesso
+--------------------------------------------------------------------------------
+{
+  "event": "broadcast:statusUpdate",
+  "link": "https://relatorios.beecrm.com/2024/campanha-001",
+  "data": {
+    "broadcastId": "campanha-2024-001",
+    "details": {
+      "status": 1,
+      "totalContacts": 1000,
+      "failedContacts": 25
+    }
+  }
+}
+
+--------------------------------------------------------------------------------
+CASO 3: Marcar campanha como falha
+--------------------------------------------------------------------------------
+{
+  "event": "broadcast:statusUpdate",
+  "data": {
+    "broadcastId": "campanha-2024-001",
+    "details": {
+      "error": "Erro na API do WhatsApp - conexão recusada"
+    }
+  }
+}
+
+--------------------------------------------------------------------------------
+CASO 4: Atualizar apenas o status
+--------------------------------------------------------------------------------
+{
+  "event": "update_status",
+  "broadcastId": "campanha-2024-001",
+  "status": 3,
+  "link": "https://relatorios.beecrm.com/2024/campanha-001"
+}
+
+================================================================================
+CONTATO E SUPORTE:
+
+Para dúvidas ou problemas com este endpoint, consulte:
+- Logs da aplicação em storage/logs/
+- Código fonte: app/Http/Controllers/CampaignController.php (método webhookEvent)
+- Modelo: app/Models/Campaign.php
+
+================================================================================

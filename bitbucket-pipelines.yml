@@ -5,19 +5,58 @@
 
 image: node:22
 
+definitions:
+  steps:
+    - step: &deploy-development
+        name: Deploy development
+        deployment: development
+        caches:
+          - node
+        script:
+          - npm ci
+          - npm run build
+          - pipe: atlassian/ssh-run:0.4.3
+            variables:
+              SSH_USER: $DEV_SSH_USER
+              SERVER: $DEV_SSH_HOST
+              SSH_KEY: $SSH_PRIVATE_KEY
+              COMMAND: |
+                set -euo pipefail
+                cd /root/homolog/beecrm-broadcast
+                git fetch origin development
+                git reset --hard origin/development
+                npm ci
+                npx prisma migrate deploy
+                npm run build
+                export NODE_ENV=development
+                pm2 reload homologation-broadcast --update-env || pm2 start dist/main.js --name homologation-broadcast --update-env
+    - step: &deploy-production
+        name: Deploy production
+        deployment: production
+        caches:
+          - node
+        script:
+          - npm ci
+          - npm run build
+          - pipe: atlassian/ssh-run:0.4.3
+            variables:
+              SSH_USER: $PROD_SSH_USER
+              SERVER: $PROD_SSH_HOST
+              SSH_KEY: $SSH_PRIVATE_KEY
+              COMMAND: |
+                set -euo pipefail
+                cd /root/prod/beecrm-broadcast
+                git fetch origin main
+                git reset --hard origin/main
+                npm ci
+                npx prisma migrate deploy
+                npm run build
+                export NODE_ENV=production
+                pm2 reload production-broadcast --update-env || pm2 start dist/main.js --name production-broadcast --update-env
+
 pipelines:
-  default:
-    - parallel:
-        - step:
-            name: Build and Test
-            caches:
-              - node
-            script:
-              - npm install
-              - npm test
-        - step:
-            name: Deploy to test
-            deployment: test
-            # trigger: manual  # Uncomment to make this a manual deployment.
-            script:
-              - echo "Deploying to test environment"
+  branches:
+    development:
+      - step: *deploy-development
+    main:
+      - step: *deploy-production

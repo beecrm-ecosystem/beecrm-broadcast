@@ -41,6 +41,7 @@ export interface DiogenesResponse {
 export class DiogenesService {
   private readonly logger = new Logger(DiogenesService.name);
   private readonly baseUrl = process.env.DIOGENES_URL || 'https://diogenes.beecrm.io';
+  private readonly apiKey = process.env.HERMES_API_KEY;
   private readonly isTestMode = process.env.DIOGENES_TEST_MODE === 'true';
 
   constructor(private readonly httpService: HttpService) {}
@@ -62,7 +63,13 @@ export class DiogenesService {
         return this.simulateResponse(data.number);
       }
 
-      const response = await firstValueFrom(this.httpService.post<DiogenesResponse>(url, data));
+      const response = await firstValueFrom(
+        this.httpService.post<DiogenesResponse>(url, data, {
+          headers: {
+            apikey: this.apiKey,
+          },
+        }),
+      );
 
       this.logger.log(`Mensagem enviada com sucesso. ID: ${response.data.key.id}`);
 

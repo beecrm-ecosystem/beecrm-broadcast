@@ -6,7 +6,15 @@ import { join } from 'path';
 import { AllExceptionsFilter } from './broadcast/filters/http-exception.filter';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // Define nível de log baseado no ambiente
+  const logLevels: Array<'error' | 'warn' | 'log' | 'debug' | 'verbose'> =
+    process.env.NODE_ENV === 'production'
+      ? ['error', 'warn', 'log']
+      : ['error', 'warn', 'log', 'debug', 'verbose'];
+
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    logger: logLevels,
+  });
   const logger = new Logger('Bootstrap');
 
   // Define prefixo global para as rotas da API

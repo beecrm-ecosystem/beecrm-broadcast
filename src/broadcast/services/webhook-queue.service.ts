@@ -37,9 +37,8 @@ export class WebhookQueueService {
       },
     );
 
-    this.logger.log(
-      `📤 Webhook Meta adicionado à fila - Job ID: ${job.id} - Message ID: ${status.id}`,
-    );
+    // Log apenas em debug
+    this.logger.debug(`📤 Webhook Meta na fila - Job: ${job.id} - Msg: ${status.id}`);
 
     return job.id || '';
   }
@@ -65,9 +64,8 @@ export class WebhookQueueService {
       },
     );
 
-    this.logger.log(
-      `📤 Webhook Diogenes adicionado à fila - Job ID: ${job.id} - Event: ${payload.event}`,
-    );
+    // Log apenas em debug
+    this.logger.debug(`📤 Webhook Diogenes na fila - Job: ${job.id} - Event: ${payload.event}`);
 
     return job.id || '';
   }

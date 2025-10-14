@@ -48,7 +48,8 @@ export class WebhookService {
       },
     });
 
-    this.logger.log(`Webhook salvo: ${webhookEvent.id} - Status: ${whatsappStatus}`);
+    // Log apenas em debug
+    this.logger.debug(`Webhook salvo: ${webhookEvent.id} - ${whatsappStatus}`);
 
     // Busca a mensagem pelo whatsappMessageId
     const message = await this.prisma.message.findFirst({
@@ -62,9 +63,7 @@ export class WebhookService {
     });
 
     if (!message) {
-      this.logger.warn(
-        `Mensagem não encontrada para whatsappMessageId: ${messageId} - Recipient: ${recipientPhone}`,
-      );
+      this.logger.debug(`Mensagem não encontrada: ${messageId} - ${recipientPhone}`);
       // Tenta buscar pelo telefone do destinatário (fallback)
       const messageByPhone = await this.findMessageByPhone(recipientPhone);
       if (messageByPhone) {
@@ -166,9 +165,8 @@ export class WebhookService {
     const newStatus = this.mapMetaStatusToMessageStatus(whatsappStatus);
     const now = new Date();
 
-    this.logger.log(
-      `Atualizando mensagem ${message.id} de ${message.status} para ${newStatus} (Meta: ${whatsappStatus})`,
-    );
+    // Log apenas em debug
+    this.logger.debug(`Atualiza ${message.id}: ${message.status} → ${newStatus}`);
 
     // Dados de erro (se houver)
     let errorData: any = null;
@@ -226,7 +224,8 @@ export class WebhookService {
       },
     });
 
-    this.logger.log(`✅ Mensagem ${message.id} atualizada com sucesso para ${newStatus}`);
+    // Log apenas em debug
+    this.logger.debug(`✅ ${message.id} → ${newStatus}`);
   }
 
   /**
@@ -340,9 +339,8 @@ export class WebhookService {
         data: updateData,
       });
 
-      this.logger.log(
-        `Contadores da campanha ${campaignId} atualizados: ${previousStatus} → ${newStatus}`,
-      );
+      // Log apenas em debug
+      this.logger.debug(`Contadores ${campaignId}: ${previousStatus} → ${newStatus}`);
     }
   }
 }

@@ -2,6 +2,7 @@ import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 import { WebhookService } from '../webhook/webhook.service';
+import { FileLoggerService } from '../services/file-logger.service';
 
 export interface MetaWebhookJob {
   type: 'meta';
@@ -72,7 +73,10 @@ export type WebhookJob = MetaWebhookJob | DiogenesWebhookJob;
 export class WebhookProcessor extends WorkerHost {
   private readonly logger = new Logger(WebhookProcessor.name);
 
-  constructor(private readonly webhookService: WebhookService) {
+  constructor(
+    private readonly webhookService: WebhookService,
+    private readonly fileLogger: FileLoggerService,
+  ) {
     super();
   }
 
@@ -81,13 +85,23 @@ export class WebhookProcessor extends WorkerHost {
 
     try {
       if (jobData.type === 'meta') {
-        this.logger.log(
-          `📥 Processando webhook Meta - Message ID: ${jobData.status.id} - Status: ${jobData.status.status} - Recipient: ${jobData.status.recipient_id}`,
-        );
+        // Log em arquivo ao invés do terminal
+        this.fileLogger.logWebhook({
+          timestamp: new Date().toISOString(),
+          type: 'meta',
+          messageId: jobData.status.id,
+          status: jobData.status.status,
+          recipient: jobData.status.recipient_id,
+          metadata: jobData.metadata,
+          payload: jobData.status,
+        });
 
         await this.webhookService.processMetaWebhook(jobData.status, jobData.metadata);
 
-        this.logger.log(`✅ Webhook Meta processado com sucesso - Job ID: ${job.id}`);
+        // Apenas log de sucesso resumido no terminal
+        this.logger.debug(
+          `✅ Webhook processado - ${jobData.status.status} - ${jobData.status.recipient_id}`,
+        );
 
         return {
           success: true,
@@ -96,13 +110,19 @@ export class WebhookProcessor extends WorkerHost {
           status: jobData.status.status,
         };
       } else if (jobData.type === 'diogenes') {
-        this.logger.log(
-          `📥 Processando webhook Diogenes - Event: ${jobData.payload.event} - Message ID: ${jobData.payload.data?.key?.id}`,
-        );
+        // Log em arquivo ao invés do terminal
+        this.fileLogger.logWebhook({
+          timestamp: new Date().toISOString(),
+          type: 'diogenes',
+          messageId: jobData.payload.data?.key?.id || 'unknown',
+          status: jobData.payload.event,
+          recipient: jobData.payload.data?.key?.remoteJid || 'unknown',
+          payload: jobData.payload,
+        });
 
         await this.webhookService.processDiogenesWebhook(jobData.payload);
 
-        this.logger.log(`✅ Webhook Diogenes processado com sucesso - Job ID: ${job.id}`);
+        this.logger.debug(`✅ Webhook Diogenes processado - ${jobData.payload.event}`);
 
         return {
           success: true,

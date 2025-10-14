@@ -19,6 +19,8 @@ import { CampaignWebhookService } from './services/campaign-webhook.service';
 import { MetricsService } from './services/metrics.service';
 import { MetricsController } from './metrics/metrics.controller';
 import { LoggerMiddleware } from './middlewares/logger.middleware';
+import { FileLoggerService } from './services/file-logger.service';
+import { LogsController } from './logs/logs.controller';
 
 @Module({
   imports: [
@@ -40,7 +42,13 @@ import { LoggerMiddleware } from './middlewares/logger.middleware';
       maxRedirects: 5,
     }),
   ],
-  controllers: [BroadcastController, WebhookController, QueueController, MetricsController],
+  controllers: [
+    BroadcastController,
+    WebhookController,
+    QueueController,
+    MetricsController,
+    LogsController,
+  ],
   providers: [
     BroadcastService,
     PrismaService,
@@ -55,6 +63,7 @@ import { LoggerMiddleware } from './middlewares/logger.middleware';
     WebhookProcessor,
     WebhookService,
     WebhookQueueService,
+    FileLoggerService,
   ],
   exports: [BroadcastService, QueueService, ImportService, MetricsService, WebhookQueueService],
 })

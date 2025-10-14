@@ -81,7 +81,8 @@ export class WebhookController {
    */
   @Post('campaign-status')
   async handleCampaignStatus(@Body() payload: MetaWhatsAppWebhookDto) {
-    this.logger.log(`📥 Webhook Meta recebido: ${payload.object}`);
+    // Log resumido no terminal
+    this.logger.debug(`📥 Webhook Meta recebido: ${payload.object}`);
 
     try {
       const jobIds: string[] = [];
@@ -92,9 +93,8 @@ export class WebhookController {
           if (change.value.statuses) {
             // Adiciona cada status à fila
             for (const status of change.value.statuses) {
-              this.logger.log(
-                `➕ Adicionando à fila - Status: ${status.status} - Message ID: ${status.id} - Recipient: ${status.recipient_id}`,
-              );
+              // Log apenas em debug (não aparece em produção)
+              this.logger.debug(`➕ Fila - ${status.status} - ${status.recipient_id}`);
 
               const jobId = await this.webhookQueueService.addMetaWebhook(
                 status,
@@ -107,7 +107,7 @@ export class WebhookController {
 
           if (change.value.messages) {
             // Log de mensagens recebidas (futuro: adicionar à fila também)
-            this.logger.log(`💬 Mensagens recebidas: ${change.value.messages.length}`);
+            this.logger.debug(`💬 Mensagens recebidas: ${change.value.messages.length}`);
           }
         }
       }
@@ -133,9 +133,7 @@ export class WebhookController {
    */
   @Post('diogenes')
   async handleDiogenesWebhook(@Body() payload: DiogenesWebhookDto) {
-    this.logger.log(
-      `📥 Webhook Diogenes recebido: ${payload.event} - Message ID: ${payload.data?.key?.id}`,
-    );
+    this.logger.debug(`📥 Webhook Diogenes: ${payload.event}`);
 
     try {
       const jobId = await this.webhookQueueService.addDiogenesWebhook(payload);

@@ -6,7 +6,7 @@ services:
     container_name: beecrm-postgres
     restart: unless-stopped
     ports:
-      - '5432:5432'
+      - '4001:5432'
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -21,7 +21,7 @@ services:
     container_name: beecrm-redis
     restart: unless-stopped
     ports:
-      - '6379:6379'
+      - '4002:6379'
     volumes:
       - redis_data:/data
     networks:
@@ -32,14 +32,14 @@ services:
     container_name: beecrm-minio
     restart: unless-stopped
     ports:
-      # - '9000:9000'
-      - '9010:9001'
+      # - '4003:9000'
+      - '4003:9001'
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     volumes:
       - minio_data:/data
-    command: server /data --console-address ":9010"
+    command: server /data --console-address ":9001"
     networks:
       - beecrm-network
 

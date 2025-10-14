@@ -10,8 +10,10 @@ import { FileParserService } from './services/file-parser.service';
 import { ImportService } from './services/import.service';
 import { BroadcastProcessor } from './queues/broadcast.processor';
 import { ImportContactsProcessor } from './queues/import-contacts.processor';
+import { WebhookProcessor } from './queues/webhook.processor';
 import { WebhookController } from './webhook/webhook.controller';
 import { WebhookService } from './webhook/webhook.service';
+import { WebhookQueueService } from './services/webhook-queue.service';
 import { QueueController } from './queue/queue.controller';
 import { CampaignWebhookService } from './services/campaign-webhook.service';
 import { MetricsService } from './services/metrics.service';
@@ -27,6 +29,10 @@ import { LoggerMiddleware } from './middlewares/logger.middleware';
     // Configuração do BullMQ - Fila de importação de contatos
     BullModule.registerQueue({
       name: 'import-contacts-queue',
+    }),
+    // Configuração do BullMQ - Fila de processamento de webhooks
+    BullModule.registerQueue({
+      name: 'webhook-queue',
     }),
     // HTTP para chamadas ao Diogenes
     HttpModule.register({
@@ -46,9 +52,11 @@ import { LoggerMiddleware } from './middlewares/logger.middleware';
     ImportService,
     BroadcastProcessor,
     ImportContactsProcessor,
+    WebhookProcessor,
     WebhookService,
+    WebhookQueueService,
   ],
-  exports: [BroadcastService, QueueService, ImportService, MetricsService],
+  exports: [BroadcastService, QueueService, ImportService, MetricsService, WebhookQueueService],
 })
 export class BroadcastModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {

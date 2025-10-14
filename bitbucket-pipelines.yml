@@ -29,7 +29,7 @@ definitions:
                 npx prisma migrate deploy
                 npm run build
                 export NODE_ENV=development
-                pm2 reload homologation-broadcast --update-env || pm2 start dist/main.js --name homologation-broadcast --update-env
+                pm2 reload homologation-broadcast --update-env || pm2 start dist/src/main.js --name homologation-broadcast --update-env
     - step: &deploy-production
         name: Deploy production
         deployment: production
@@ -52,7 +52,7 @@ definitions:
                 npx prisma migrate deploy
                 npm run build
                 export NODE_ENV=production
-                pm2 reload production-broadcast --update-env || pm2 start dist/main.js --name production-broadcast --update-env
+                pm2 reload production-broadcast --update-env || pm2 start dist/src/main.js --name production-broadcast --update-env
 
 pipelines:
   branches:

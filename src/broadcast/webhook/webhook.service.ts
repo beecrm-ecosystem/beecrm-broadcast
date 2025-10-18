@@ -120,6 +120,8 @@ export class WebhookService {
       return;
     }
 
+    const previousStatus = message.status as MessageStatus | undefined;
+
     // Atualiza a mensagem
     await this.prisma.message.update({
       where: { id: message.id },
@@ -148,7 +150,7 @@ export class WebhookService {
     });
 
     // Atualiza contadores da campanha
-    await this.updateCampaignCounters(message.campaignId, newStatus);
+    await this.updateCampaignCounters(message.campaignId, newStatus, previousStatus);
 
     this.logger.log(`Mensagem ${message.id} atualizada para status: ${newStatus}`);
   }
@@ -177,6 +179,8 @@ export class WebhookService {
         errorDetails: statusData.errors,
       };
     }
+
+    const previousStatus = message.status as MessageStatus | undefined;
 
     // Atualiza a mensagem
     await this.prisma.message.update({
@@ -212,7 +216,7 @@ export class WebhookService {
     });
 
     // Atualiza contadores da campanha
-    await this.updateCampaignCounters(message.campaignId, newStatus, message.status);
+    await this.updateCampaignCounters(message.campaignId, newStatus, previousStatus);
 
     // Marca o webhook como processado
     await this.prisma.webhookEvent.update({
@@ -298,6 +302,10 @@ export class WebhookService {
     previousStatus?: MessageStatus,
   ) {
     const updateData: any = {};
+
+    if (previousStatus && previousStatus === newStatus) {
+      return;
+    }
 
     // Decrementa o contador do status anterior (se houver)
     if (previousStatus) {

@@ -77,13 +77,18 @@ export class CampaignWebhookService {
     // }
 
     // Calcula os valores baseados na campanha ou nas opções
-    const totalContacts = options.totalContacts ?? campaign.totalRecipients;
-    const sentContacts = options.sentContacts ?? campaign.sentCount;
-    const deliveredContacts = options.deliveredContacts ?? campaign.deliveredCount;
-    const readContacts = options.readContacts ?? campaign.readCount;
-    const failedContacts = options.failedContacts ?? campaign.failedCount;
+    const totalContacts = Math.max(options.totalContacts ?? campaign.totalRecipients, 0);
+    const sentContactsRaw = options.sentContacts ?? campaign.sentCount;
+    const failedContactsRaw = options.failedContacts ?? campaign.failedCount;
+    const deliveredContactsRaw = options.deliveredContacts ?? campaign.deliveredCount;
+    const readContactsRaw = options.readContacts ?? campaign.readCount;
+
+    const sentContacts = Math.min(Math.max(sentContactsRaw, 0), totalContacts);
+    const failedContacts = Math.min(Math.max(failedContactsRaw, 0), totalContacts);
+    const deliveredContacts = Math.min(Math.max(deliveredContactsRaw, 0), sentContacts);
+    const readContacts = Math.min(Math.max(readContactsRaw, 0), deliveredContacts);
     const pendingContacts =
-      options.pendingContacts ?? totalContacts - sentContacts - failedContacts;
+      options.pendingContacts ?? Math.max(totalContacts - sentContacts - failedContacts, 0);
 
     const payload: any = {
       event: 'broadcast:statusUpdate',

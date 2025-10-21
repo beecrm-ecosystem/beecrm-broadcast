@@ -301,6 +301,9 @@ export class WebhookService {
 
   /**
    * Atualiza contadores da campanha baseado no novo status
+   *
+   * IMPORTANTE: sentCount e failedCount são contadores FINAIS que nunca decrementam
+   * deliveredCount e readCount são métricas adicionais que podem sobrepor
    */
   private async updateCampaignCounters(
     campaignId: string,
@@ -313,11 +316,14 @@ export class WebhookService {
       return;
     }
 
-    // Decrementa o contador do status anterior (se houver)
+    // REGRA: sentCount e failedCount NUNCA decrementam (são os contadores principais)
+    // deliveredCount e readCount são métricas adicionais que podem decrementar
+
+    // Decrementa o contador do status anterior (se houver e se não for SENT/FAILED)
     if (previousStatus) {
       switch (previousStatus) {
         case 'SENT':
-          updateData.sentCount = { decrement: 1 };
+          // NÃO decrementa sentCount - é um contador final!
           break;
         case 'DELIVERED':
           updateData.deliveredCount = { decrement: 1 };
@@ -326,7 +332,7 @@ export class WebhookService {
           updateData.readCount = { decrement: 1 };
           break;
         case 'FAILED':
-          updateData.failedCount = { decrement: 1 };
+          // NÃO decrementa failedCount - é um contador final!
           break;
       }
     }
@@ -334,7 +340,10 @@ export class WebhookService {
     // Incrementa o contador do novo status
     switch (newStatus) {
       case 'SENT':
-        updateData.sentCount = { increment: 1 };
+        // Só incrementa se não havia status anterior (primeira vez sendo enviado)
+        if (!previousStatus) {
+          updateData.sentCount = { increment: 1 };
+        }
         break;
       case 'DELIVERED':
         updateData.deliveredCount = { increment: 1 };
@@ -343,7 +352,10 @@ export class WebhookService {
         updateData.readCount = { increment: 1 };
         break;
       case 'FAILED':
-        updateData.failedCount = { increment: 1 };
+        // Só incrementa se não havia status anterior (primeira vez falhando)
+        if (!previousStatus) {
+          updateData.failedCount = { increment: 1 };
+        }
         break;
     }
 

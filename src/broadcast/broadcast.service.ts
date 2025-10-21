@@ -6,9 +6,11 @@ import {
   UpdateCampaignDto,
   AddRecipientsDto,
   CampaignStatsDto,
+  AddContactsDto,
 } from './schemas/broadcast.dto';
 import { CampaignStatus } from '@prisma/client';
 import { CampaignWebhookService } from './services/campaign-webhook.service';
+import { CampaignSchedulerService } from './services/campaign-scheduler.service';
 
 @Injectable()
 export class BroadcastService {
@@ -18,6 +20,7 @@ export class BroadcastService {
     private readonly prisma: PrismaService,
     private readonly queueService: QueueService,
     private readonly campaignWebhook: CampaignWebhookService,
+    private readonly campaignScheduler: CampaignSchedulerService,
   ) {}
 
   /**
@@ -36,6 +39,13 @@ export class BroadcastService {
       if (!dto.channel) {
         this.logger.warn('Canal não informado, usando "whatsapp" como padrão');
       }
+
+      const requestedStartDate = dto.startDate !== undefined ? dto.startDate : dto.scheduledAt;
+      const scheduledAt =
+        requestedStartDate !== null && requestedStartDate !== undefined
+          ? this.ensureFutureScheduledDate(requestedStartDate)
+          : null;
+      const initialStatus = scheduledAt ? CampaignStatus.SCHEDULED : CampaignStatus.DRAFT;
 
       // Gera templateId se não foi fornecido
       let templateId: string;
@@ -62,12 +72,12 @@ export class BroadcastService {
           templateData: dto.template, // Armazena o template completo em JSON
           channel: dto.channel || 'whatsapp',
           phoneNumberId: dto.phoneNumberId,
-          scheduledAt: dto.scheduledAt,
+          scheduledAt: scheduledAt ?? undefined,
           batchSize: dto.batchSize || 100,
           delayBetweenBatches: dto.delayBetweenBatches || 5000,
           tags: dto.tags || [],
           metadata: dto.metadata,
-          status: 'DRAFT',
+          status: initialStatus,
         },
       });
 
@@ -75,6 +85,13 @@ export class BroadcastService {
       this.logger.log(`Enviando webhook de criação...`);
 
       await this.campaignWebhook.sendUpdateStatus(campaign);
+
+      if (scheduledAt) {
+        await this.campaignScheduler.scheduleCampaign({
+          campaignId: campaign.id,
+          startAt: scheduledAt,
+        });
+      }
 
       this.logger.log('===== CAMPANHA CRIADA COM SUCESSO =====');
       return campaign;
@@ -189,20 +206,61 @@ export class BroadcastService {
       throw new Error('Não é possível editar uma campanha completada ou cancelada');
     }
 
+    const updateData: any = {
+      name: dto.name,
+      description: dto.description,
+      batchSize: dto.batchSize,
+      delayBetweenBatches: dto.delayBetweenBatches,
+      tags: dto.tags,
+      metadata: dto.metadata,
+    };
+
+    let shouldSchedule = false;
+    let shouldCancelSchedule = false;
+    let scheduleDate: Date | null = null;
+
+    if (dto.startDate !== undefined) {
+      if (dto.startDate === null) {
+        shouldCancelSchedule = true;
+      } else {
+        scheduleDate = this.ensureFutureScheduledDate(dto.startDate);
+        shouldSchedule = true;
+      }
+    } else if (dto.scheduledAt !== undefined) {
+      if (dto.scheduledAt === null) {
+        shouldCancelSchedule = true;
+      } else {
+        scheduleDate = this.ensureFutureScheduledDate(dto.scheduledAt);
+        shouldSchedule = true;
+      }
+    }
+
+    if (shouldSchedule && scheduleDate) {
+      if (!['DRAFT', 'SCHEDULED'].includes(campaign.status)) {
+        throw new Error('Não é possível agendar uma campanha neste estado.');
+      }
+      updateData.scheduledAt = scheduleDate;
+      updateData.status = CampaignStatus.SCHEDULED;
+    } else if (shouldCancelSchedule) {
+      updateData.scheduledAt = null;
+      if (campaign.status === 'SCHEDULED') {
+        updateData.status = CampaignStatus.DRAFT;
+      }
+    }
+
     const updated = await this.prisma.campaign.update({
       where: { id },
-      data: {
-        name: dto.name,
-        description: dto.description,
-        scheduledAt: dto.scheduledAt,
-        batchSize: dto.batchSize,
-        delayBetweenBatches: dto.delayBetweenBatches,
-        tags: dto.tags,
-        metadata: dto.metadata,
-      },
+      data: updateData,
     });
 
     this.logger.log(`Campanha atualizada: ${id}`);
+
+    if (shouldSchedule && scheduleDate) {
+      await this.campaignScheduler.scheduleCampaign({ campaignId: id, startAt: scheduleDate });
+    } else if (shouldCancelSchedule) {
+      await this.campaignScheduler.cancelScheduledCampaign(id);
+    }
+
     return updated;
   }
 
@@ -245,6 +303,27 @@ export class BroadcastService {
       count: result.count,
       message: `${result.count} destinatários adicionados com sucesso`,
     };
+  }
+
+  /**
+   * Adiciona destinatários usando o formato legado de contacts
+   */
+  async addContacts(campaignId: string, dto: AddContactsDto) {
+    if (!dto.contacts || dto.contacts.length === 0) {
+      throw new Error('Nenhum contato informado');
+    }
+
+    const recipients: AddRecipientsDto = {
+      recipients: dto.contacts.map((contact) => ({
+        phoneNumber: contact.phone,
+        name: contact.name,
+        email: contact.email,
+        variables: this.sanitizeVariables(contact.variables),
+        metadata: contact.metadata,
+      })),
+    };
+
+    return this.addRecipients(campaignId, recipients);
   }
 
   /**
@@ -301,6 +380,8 @@ export class BroadcastService {
     if (campaign.totalRecipients === 0) {
       throw new Error('A campanha não possui destinatários');
     }
+
+    await this.campaignScheduler.cancelScheduledCampaign(id);
 
     // Atualiza status para PROCESSING
     const updated = await this.prisma.campaign.update({
@@ -469,5 +550,37 @@ export class BroadcastService {
         failure: `${failureRate}%`,
       },
     };
+  }
+
+  private ensureFutureScheduledDate(rawDate: string | Date): Date {
+    const parsedDate = rawDate instanceof Date ? rawDate : new Date(rawDate);
+
+    if (Number.isNaN(parsedDate.getTime())) {
+      throw new Error('Data de início inválida. Use um formato ISO 8601.');
+    }
+
+    if (parsedDate.getTime() <= Date.now()) {
+      throw new Error('A data de início deve estar no futuro.');
+    }
+
+    return parsedDate;
+  }
+
+  private sanitizeVariables(variables?: Record<string, any>): Record<string, string> | undefined {
+    if (!variables || typeof variables !== 'object') {
+      return undefined;
+    }
+
+    const sanitized: Record<string, string> = {};
+
+    for (const [key, value] of Object.entries(variables)) {
+      if (value === null || value === undefined) {
+        continue;
+      }
+
+      sanitized[key] = String(value);
+    }
+
+    return Object.keys(sanitized).length > 0 ? sanitized : undefined;
   }
 }

@@ -21,12 +21,19 @@ import { MetricsController } from './metrics/metrics.controller';
 import { LoggerMiddleware } from './middlewares/logger.middleware';
 import { FileLoggerService } from './services/file-logger.service';
 import { LogsController } from './logs/logs.controller';
+import { LegacyBroadcastController } from './legacy-broadcast.controller';
+import { CampaignSchedulerService } from './services/campaign-scheduler.service';
+import { CampaignSchedulerProcessor } from './queues/campaign-scheduler.processor';
 
 @Module({
   imports: [
     // Configuração do BullMQ - Fila de envio de mensagens
     BullModule.registerQueue({
       name: 'broadcast-queue',
+    }),
+    // Fila responsável por iniciar campanhas agendadas
+    BullModule.registerQueue({
+      name: 'campaign-scheduler-queue',
     }),
     // Configuração do BullMQ - Fila de importação de contatos
     BullModule.registerQueue({
@@ -44,6 +51,7 @@ import { LogsController } from './logs/logs.controller';
   ],
   controllers: [
     BroadcastController,
+    LegacyBroadcastController,
     WebhookController,
     QueueController,
     MetricsController,
@@ -64,6 +72,8 @@ import { LogsController } from './logs/logs.controller';
     WebhookService,
     WebhookQueueService,
     FileLoggerService,
+    CampaignSchedulerService,
+    CampaignSchedulerProcessor,
   ],
   exports: [BroadcastService, QueueService, ImportService, MetricsService, WebhookQueueService],
 })

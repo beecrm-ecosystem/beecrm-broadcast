@@ -22,6 +22,7 @@ import {
   UpdateCampaignDto,
   AddRecipientsDto,
   CampaignFilterDto,
+  AddContactsDto,
 } from './schemas/broadcast.dto';
 
 @Controller('broadcast')
@@ -103,6 +104,15 @@ export class BroadcastController {
   @Post(':id/recipients')
   async addRecipients(@Param('id') id: string, @Body() addRecipientsDto: AddRecipientsDto) {
     return this.broadcastService.addRecipients(id, addRecipientsDto);
+  }
+
+  /**
+   * POST /broadcast/:id/contacts
+   * Alias legacy para adicionar destinatários usando o formato "contacts"
+   */
+  @Post(':id/contacts')
+  async addContacts(@Param('id') id: string, @Body() addContactsDto: AddContactsDto) {
+    return this.broadcastService.addContacts(id, addContactsDto);
   }
 
   /**

@@ -1,6 +1,6 @@
 import { HttpService } from '@nestjs/axios';
 import { Injectable, Logger } from '@nestjs/common';
-import { Campaign, CampaignStatus } from '@prisma/client';
+import { Campaign, CampaignStatus, MessageStatus } from '@prisma/client';
 import { firstValueFrom } from 'rxjs';
 
 interface UpdateStatusOptions {
@@ -19,6 +19,23 @@ interface BroadcastSummaryOptions {
   pendingContacts?: number;
   error?: string;
   link?: string;
+  successMessages?: BroadcastMessageSummary[];
+  failedMessages?: BroadcastMessageSummary[];
+}
+
+export interface BroadcastMessageSummary {
+  recipientId: string;
+  phoneNumber: string;
+  status: MessageStatus;
+  name?: string | null;
+  messageId?: string | null;
+  externalId?: string | null;
+  sentAt?: Date | string | null;
+  deliveredAt?: Date | string | null;
+  readAt?: Date | string | null;
+  failedAt?: Date | string | null;
+  errorCode?: string | null;
+  errorMessage?: string | null;
 }
 
 @Injectable()
@@ -112,6 +129,14 @@ export class CampaignWebhookService {
 
     if (options.error) {
       payload.data.details.error = options.error;
+    }
+
+    if (options.successMessages && options.successMessages.length > 0) {
+      payload.data.details.successMessages = options.successMessages;
+    }
+
+    if (options.failedMessages && options.failedMessages.length > 0) {
+      payload.data.details.failedMessages = options.failedMessages;
     }
 
     this.logger.debug(`Payload do webhook: ${JSON.stringify(payload, null, 2)}`);

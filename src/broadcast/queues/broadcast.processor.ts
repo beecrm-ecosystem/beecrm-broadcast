@@ -1,9 +1,13 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
+import { MessageStatus } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { DiogenesService } from '../services/diogenes.service';
-import { CampaignWebhookService } from '../services/campaign-webhook.service';
+import {
+  CampaignWebhookService,
+  BroadcastMessageSummary,
+} from '../services/campaign-webhook.service';
 
 export interface SendMessageJob {
   campaignId: string;
@@ -241,6 +245,8 @@ export class BroadcastProcessor extends WorkerHost {
         },
       });
 
+      const { successMessages, failedMessages } = await this.buildCompletionSummaries(campaignId);
+
       // Limpa cache de progresso
       this.progressCache.delete(campaignId);
 
@@ -253,8 +259,132 @@ export class BroadcastProcessor extends WorkerHost {
       await this.campaignWebhookService.sendBroadcastSummary(completedCampaign, {
         status: 'COMPLETED',
         totalContacts: completedCampaign.totalRecipients,
+        sentContacts: completedCampaign.sentCount,
         failedContacts: completedCampaign.failedCount,
+        pendingContacts: 0,
+        successMessages,
+        failedMessages,
       });
     }
+  }
+
+  private async buildCompletionSummaries(campaignId: string): Promise<{
+    successMessages: BroadcastMessageSummary[];
+    failedMessages: BroadcastMessageSummary[];
+  }> {
+    const [successfulRecipients, failedRecipients] = await Promise.all([
+      this.prisma.campaignRecipient.findMany({
+        where: {
+          campaignId,
+          isActive: true,
+          status: {
+            in: ['SENT', 'DELIVERED', 'READ'],
+          },
+        },
+        select: {
+          id: true,
+          phoneNumber: true,
+          name: true,
+          status: true,
+          metadata: true,
+          messages: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+            select: {
+              id: true,
+              externalId: true,
+              status: true,
+              sentAt: true,
+              deliveredAt: true,
+              readAt: true,
+              failedAt: true,
+              errorCode: true,
+              errorMessage: true,
+            },
+          },
+        },
+      }),
+      this.prisma.campaignRecipient.findMany({
+        where: {
+          campaignId,
+          isActive: true,
+          status: 'FAILED',
+        },
+        select: {
+          id: true,
+          phoneNumber: true,
+          name: true,
+          status: true,
+          metadata: true,
+          messages: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+            select: {
+              id: true,
+              externalId: true,
+              status: true,
+              sentAt: true,
+              deliveredAt: true,
+              readAt: true,
+              failedAt: true,
+              errorCode: true,
+              errorMessage: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    const successMessages = successfulRecipients.map((recipient) =>
+      this.mapRecipientSummary(recipient),
+    );
+    const failedMessages = failedRecipients.map((recipient) => this.mapRecipientSummary(recipient));
+
+    return { successMessages, failedMessages };
+  }
+
+  private mapRecipientSummary(recipient: {
+    id: string;
+    phoneNumber: string;
+    name: string | null;
+    status: MessageStatus;
+    metadata: any;
+    messages: Array<{
+      id: string;
+      externalId: string | null;
+      status: MessageStatus;
+      sentAt: Date | null;
+      deliveredAt: Date | null;
+      readAt: Date | null;
+      failedAt: Date | null;
+      errorCode: string | null;
+      errorMessage: string | null;
+    }>;
+  }): BroadcastMessageSummary {
+    const [lastMessage] = recipient.messages;
+    const metadata = this.normalizeMetadata(recipient.metadata);
+
+    return {
+      recipientId: recipient.id,
+      phoneNumber: recipient.phoneNumber,
+      name: recipient.name,
+      status: recipient.status,
+      messageId: lastMessage?.id ?? null,
+      externalId: lastMessage?.externalId ?? metadata.externalId ?? null,
+      sentAt: lastMessage?.sentAt ?? metadata.sentAt ?? null,
+      deliveredAt: lastMessage?.deliveredAt ?? metadata.deliveredAt ?? null,
+      readAt: lastMessage?.readAt ?? metadata.readAt ?? null,
+      failedAt: lastMessage?.failedAt ?? metadata.failedAt ?? null,
+      errorCode: lastMessage?.errorCode ?? metadata.errorCode ?? null,
+      errorMessage: lastMessage?.errorMessage ?? metadata.error ?? metadata.errorMessage ?? null,
+    };
+  }
+
+  private normalizeMetadata(metadata: any): Record<string, any> {
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      return {};
+    }
+
+    return metadata as Record<string, any>;
   }
 }

@@ -43,7 +43,11 @@ export class CreateCampaignDto {
 
   @IsDateString()
   @IsOptional()
-  scheduledAt?: Date;
+  startDate?: string | null;
+
+  @IsDateString()
+  @IsOptional()
+  scheduledAt?: string | null;
 
   @IsNumber()
   @IsOptional()
@@ -79,7 +83,11 @@ export class UpdateCampaignDto {
 
   @IsDateString()
   @IsOptional()
-  scheduledAt?: Date;
+  startDate?: string | null;
+
+  @IsDateString()
+  @IsOptional()
+  scheduledAt?: string | null;
 
   @IsNumber()
   @IsOptional()
@@ -131,6 +139,40 @@ export class AddRecipientsDto {
   @ValidateNested({ each: true })
   @Type(() => RecipientDto)
   recipients: RecipientDto[];
+}
+
+export class CreateContactDto {
+  @IsString()
+  @IsNotEmpty()
+  phone: string;
+
+  @IsString()
+  @IsOptional()
+  name?: string;
+
+  @IsString()
+  @IsOptional()
+  email?: string;
+
+  @IsObject()
+  @IsOptional()
+  variables?: Record<string, any>;
+
+  @IsObject()
+  @IsOptional()
+  metadata?: any;
+}
+
+export class AddContactsDto {
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CreateContactDto)
+  contacts: CreateContactDto[];
+
+  @IsNumber()
+  @IsOptional()
+  @Min(1)
+  contacts_count?: number;
 }
 
 // ==================== QUERY FILTERS ====================

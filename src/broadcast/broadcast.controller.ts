@@ -17,6 +17,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { BroadcastService } from './broadcast.service';
 import { ImportService } from './services/import.service';
+import { CampaignMonitorService } from './services/campaign-monitor.service';
 import {
   CreateCampaignDto,
   UpdateCampaignDto,
@@ -32,7 +33,22 @@ export class BroadcastController {
   constructor(
     private readonly broadcastService: BroadcastService,
     private readonly importService: ImportService,
+    private readonly monitorService: CampaignMonitorService,
   ) {}
+
+  /**
+   * POST /broadcast/monitor/run
+   * Executa o monitoramento de campanhas manualmente (útil para testes)
+   */
+  @Post('monitor/run')
+  async runMonitor() {
+    const result = await this.monitorService.monitorRecentCampaigns();
+    return {
+      message: 'Monitoramento executado com sucesso',
+      timestamp: new Date().toISOString(),
+      ...result,
+    };
+  }
 
   /**
    * POST /broadcast

@@ -258,7 +258,7 @@ export class BroadcastProcessor extends WorkerHost {
     // Se todos os destinatários foram processados, marca como completada
     if (processedCount >= campaign.totalRecipients) {
       this.logger.log(`🏁 Todos destinatários processados! Finalizando campanha ${campaignId}`);
-      const completedCampaign = await this.prisma.campaign.update({
+      await this.prisma.campaign.update({
         where: { id: campaignId },
         data: {
           status: 'COMPLETED',
@@ -266,25 +266,43 @@ export class BroadcastProcessor extends WorkerHost {
         },
       });
 
-      const { successMessages, failedMessages } = await this.buildCompletionSummaries(campaignId);
-
       // Limpa cache de progresso
       this.progressCache.delete(campaignId);
 
       this.logger.log(
         `✅ Campanha ${campaignId} completada! Total: ${campaign.totalRecipients}, Enviados: ${campaign.sentCount}, Falhas: ${campaign.failedCount}`,
       );
+
+      // Aguarda alguns segundos para os webhooks de status (delivered/read) chegarem
+      this.logger.log(`⏳ Aguardando 5 segundos para coletar status updates do WhatsApp...`);
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+
+      // Busca os dados atualizados após o delay
+      const updatedCampaign = await this.prisma.campaign.findUnique({
+        where: { id: campaignId },
+      });
+
+      if (!updatedCampaign) {
+        this.logger.error(`Campanha ${campaignId} não encontrada após conclusão!`);
+        return;
+      }
+
+      const { successMessages, failedMessages } = await this.buildCompletionSummaries(campaignId);
+
       this.logger.log(
         `📦 Preparando webhook final (sucesso=${successMessages.length}, falhas=${failedMessages.length}) para campanha ${campaignId}`,
       );
+      this.logger.log(
+        `📊 Status final: sent=${updatedCampaign.sentCount}, delivered=${updatedCampaign.deliveredCount}, read=${updatedCampaign.readCount}, failed=${updatedCampaign.failedCount}`,
+      );
 
-      // Envia webhook final de conclusão
-      await this.campaignWebhookService.sendUpdateStatus(completedCampaign);
-      await this.campaignWebhookService.sendBroadcastSummary(completedCampaign, {
+      // Envia webhook final de conclusão com dados atualizados
+      await this.campaignWebhookService.sendUpdateStatus(updatedCampaign);
+      await this.campaignWebhookService.sendBroadcastSummary(updatedCampaign, {
         status: 'COMPLETED',
-        totalContacts: completedCampaign.totalRecipients,
-        sentContacts: completedCampaign.sentCount,
-        failedContacts: completedCampaign.failedCount,
+        totalContacts: updatedCampaign.totalRecipients,
+        sentContacts: updatedCampaign.sentCount,
+        failedContacts: updatedCampaign.failedCount,
         pendingContacts: 0,
         successMessages,
         failedMessages,

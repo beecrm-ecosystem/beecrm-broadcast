@@ -24,6 +24,8 @@ import { LogsController } from './logs/logs.controller';
 import { LegacyBroadcastController } from './legacy-broadcast.controller';
 import { CampaignSchedulerService } from './services/campaign-scheduler.service';
 import { CampaignSchedulerProcessor } from './queues/campaign-scheduler.processor';
+import { CampaignMonitorService } from './services/campaign-monitor.service';
+import { CampaignMonitorProcessor } from './queues/campaign-monitor.processor';
 
 @Module({
   imports: [
@@ -34,6 +36,10 @@ import { CampaignSchedulerProcessor } from './queues/campaign-scheduler.processo
     // Fila responsável por iniciar campanhas agendadas
     BullModule.registerQueue({
       name: 'campaign-scheduler-queue',
+    }),
+    // Fila de monitoramento de campanhas (job recorrente)
+    BullModule.registerQueue({
+      name: 'campaign-monitor-queue',
     }),
     // Configuração do BullMQ - Fila de importação de contatos
     BullModule.registerQueue({
@@ -74,6 +80,8 @@ import { CampaignSchedulerProcessor } from './queues/campaign-scheduler.processo
     FileLoggerService,
     CampaignSchedulerService,
     CampaignSchedulerProcessor,
+    CampaignMonitorService,
+    CampaignMonitorProcessor,
   ],
   exports: [BroadcastService, QueueService, ImportService, MetricsService, WebhookQueueService],
 })

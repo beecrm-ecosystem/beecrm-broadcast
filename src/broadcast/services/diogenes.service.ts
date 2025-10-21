@@ -71,9 +71,20 @@ export class DiogenesService {
         }),
       );
 
-      this.logger.log(`Mensagem enviada com sucesso. ID: ${response.data.key.id}`);
+      const payload = response?.data;
 
-      return response.data;
+      if (!payload) {
+        throw new Error('Resposta vazia do Diogenes');
+      }
+
+      if (!payload.key || !payload.key.id) {
+        this.logger.error(`Resposta inválida do Diogenes: ${JSON.stringify(payload, null, 2)}`);
+        throw new Error('Resposta do Diogenes sem identificador da mensagem');
+      }
+
+      this.logger.log(`Mensagem enviada com sucesso. ID: ${payload.key.id}`);
+
+      return payload;
     } catch (error) {
       this.logger.error(`Erro ao enviar mensagem para ${data.number}: ${error.message}`);
 

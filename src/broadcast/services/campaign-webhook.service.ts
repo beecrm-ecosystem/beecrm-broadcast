@@ -123,6 +123,11 @@ export class CampaignWebhookService {
       },
     };
 
+    if ((options.status ?? campaign.status) === CampaignStatus.COMPLETED) {
+      payload.data.details.completed = true;
+      payload.data.details.completedAt = campaign.completedAt ?? new Date();
+    }
+
     if (options.link) {
       payload.link = options.link;
     }

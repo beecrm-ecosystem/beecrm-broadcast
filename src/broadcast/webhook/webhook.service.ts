@@ -67,11 +67,17 @@ export class WebhookService {
       // Tenta buscar pelo telefone do destinatário (fallback)
       const messageByPhone = await this.findMessageByPhone(recipientPhone);
       if (messageByPhone) {
+        this.logger.log(
+          `📨 Webhook de campanha recebido (campaign=${messageByPhone.campaignId}, message=${messageByPhone.id}, status=${whatsappStatus})`,
+        );
         await this.updateMessageStatus(messageByPhone, whatsappStatus, status, webhookEvent.id);
       }
       return;
     }
 
+    this.logger.log(
+      `📨 Webhook de campanha recebido (campaign=${message.campaignId}, message=${message.id}, status=${whatsappStatus})`,
+    );
     await this.updateMessageStatus(message, whatsappStatus, status, webhookEvent.id);
   }
 

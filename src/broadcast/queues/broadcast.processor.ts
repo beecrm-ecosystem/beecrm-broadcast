@@ -184,6 +184,15 @@ export class BroadcastProcessor extends WorkerHost {
       const now = Date.now();
       const cached = this.progressCache.get(campaign.id);
       const processedCount = campaign.sentCount + campaign.failedCount;
+      const isComplete = processedCount >= campaign.totalRecipients;
+
+      // Se a campanha está completa, não envia aqui (será enviado no checkAndCompleteCampaign)
+      if (isComplete) {
+        this.logger.debug(
+          `⏭️ Campanha ${campaign.id} completa, webhook será enviado na finalização`,
+        );
+        return;
+      }
 
       // Não envia webhook se:
       // 1. Já enviou recentemente (< 30s) E
@@ -196,6 +205,9 @@ export class BroadcastProcessor extends WorkerHost {
           timeSinceLastSent < this.PROGRESS_INTERVAL &&
           countDifference < this.PROGRESS_THRESHOLD
         ) {
+          this.logger.debug(
+            `⏸️ Throttling webhook: tempo=${timeSinceLastSent}ms, diff=${countDifference}`,
+          );
           return;
         }
       }
@@ -225,18 +237,27 @@ export class BroadcastProcessor extends WorkerHost {
    * Verifica se todos os destinatários foram processados e completa a campanha
    */
   private async checkAndCompleteCampaign(campaignId: string) {
+    this.logger.debug(`🔍 Verificando conclusão da campanha ${campaignId}`);
+
     const campaign = await this.prisma.campaign.findUnique({
       where: { id: campaignId },
     });
 
     if (!campaign || campaign.status !== 'PROCESSING') {
+      this.logger.debug(
+        `⏭️ Campanha ${campaignId} não está em processamento (status=${campaign?.status ?? 'NOT_FOUND'})`,
+      );
       return;
     }
 
     const processedCount = campaign.sentCount + campaign.failedCount;
+    this.logger.debug(
+      `📊 Campanha ${campaignId}: processados=${processedCount}, total=${campaign.totalRecipients} (sent=${campaign.sentCount}, failed=${campaign.failedCount})`,
+    );
 
     // Se todos os destinatários foram processados, marca como completada
     if (processedCount >= campaign.totalRecipients) {
+      this.logger.log(`🏁 Todos destinatários processados! Finalizando campanha ${campaignId}`);
       const completedCampaign = await this.prisma.campaign.update({
         where: { id: campaignId },
         data: {

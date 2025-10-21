@@ -253,6 +253,9 @@ export class BroadcastProcessor extends WorkerHost {
       this.logger.log(
         `✅ Campanha ${campaignId} completada! Total: ${campaign.totalRecipients}, Enviados: ${campaign.sentCount}, Falhas: ${campaign.failedCount}`,
       );
+      this.logger.log(
+        `📦 Preparando webhook final (sucesso=${successMessages.length}, falhas=${failedMessages.length}) para campanha ${campaignId}`,
+      );
 
       // Envia webhook final de conclusão
       await this.campaignWebhookService.sendUpdateStatus(completedCampaign);
@@ -265,6 +268,7 @@ export class BroadcastProcessor extends WorkerHost {
         successMessages,
         failedMessages,
       });
+      this.logger.log(`📬 Webhooks finais enviados para campanha ${campaignId}`);
     }
   }
 

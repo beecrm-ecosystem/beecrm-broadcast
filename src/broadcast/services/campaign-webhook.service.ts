@@ -57,10 +57,11 @@ export class CampaignWebhookService {
     //   return;
     // }
 
-    const statusCode = options.statusCode ?? this.mapStatus(options.status ?? campaign.status);
+    const resolvedStatus = options.status ?? campaign.status;
+    const statusCode = options.statusCode ?? this.mapStatus(resolvedStatus);
 
     if (typeof statusCode !== 'number') {
-      this.logger.warn(`Status desconhecido para campanha ${campaign.id}: ${campaign.status}`);
+      this.logger.warn(`Status desconhecido para campanha ${campaign.id}: ${resolvedStatus}`);
       return;
     }
 
@@ -74,6 +75,9 @@ export class CampaignWebhookService {
       payload.link = options.link;
     }
 
+    this.logger.log(
+      `📤 Enviando webhook update_status (campaign=${campaign.id}, status=${resolvedStatus}, code=${statusCode})`,
+    );
     this.logger.debug(`Payload do webhook: ${JSON.stringify(payload, null, 2)}`);
     await this.executeRequest(baseUrl, token || '', payload, 'update_status');
   }
@@ -94,6 +98,8 @@ export class CampaignWebhookService {
     // }
 
     // Calcula os valores baseados na campanha ou nas opções
+    const resolvedStatus = options.status ?? campaign.status;
+    const mappedStatus = this.mapStatus(resolvedStatus);
     const totalContacts = Math.max(options.totalContacts ?? campaign.totalRecipients, 0);
     const sentContactsRaw = options.sentContacts ?? campaign.sentCount;
     const failedContactsRaw = options.failedContacts ?? campaign.failedCount;
@@ -112,7 +118,7 @@ export class CampaignWebhookService {
       data: {
         broadcastId: this.resolveBroadcastId(campaign),
         details: {
-          status: this.mapStatus(options.status ?? campaign.status),
+          status: mappedStatus,
           totalContacts,
           sentContacts,
           deliveredContacts,
@@ -123,7 +129,7 @@ export class CampaignWebhookService {
       },
     };
 
-    if ((options.status ?? campaign.status) === CampaignStatus.COMPLETED) {
+    if (resolvedStatus === CampaignStatus.COMPLETED) {
       payload.data.details.completed = true;
       payload.data.details.completedAt = campaign.completedAt ?? new Date();
     }
@@ -144,6 +150,14 @@ export class CampaignWebhookService {
       payload.data.details.failedMessages = options.failedMessages;
     }
 
+    this.logger.log(
+      `📤 Enviando webhook broadcast:statusUpdate (campaign=${campaign.id}, status=${resolvedStatus}, code=${mappedStatus}, total=${totalContacts}, sent=${sentContacts}, failed=${failedContacts})`,
+    );
+    if (payload.data.details.completed) {
+      this.logger.log(
+        `✅ Webhook final de campanha disparado (campaign=${campaign.id}, total=${totalContacts})`,
+      );
+    }
     this.logger.debug(`Payload do webhook: ${JSON.stringify(payload, null, 2)}`);
     await this.executeRequest(baseUrl, token || '', payload, 'broadcast:statusUpdate');
   }

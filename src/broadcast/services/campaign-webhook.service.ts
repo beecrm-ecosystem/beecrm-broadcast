@@ -151,11 +151,14 @@ export class CampaignWebhookService {
     }
 
     this.logger.log(
-      `📤 Enviando webhook broadcast:statusUpdate (campaign=${campaign.id}, status=${resolvedStatus}, code=${mappedStatus}, total=${totalContacts}, sent=${sentContacts}, failed=${failedContacts})`,
+      `📤 Enviando webhook broadcast:statusUpdate (campaign=${campaign.id}, status=${resolvedStatus}, code=${mappedStatus})`,
+    );
+    this.logger.log(
+      `   📊 Contadores: sent=${sentContacts}, delivered=${deliveredContacts}, read=${readContacts}, failed=${failedContacts}, pending=${pendingContacts}, total=${totalContacts}`,
     );
     if (payload.data.details.completed) {
       this.logger.log(
-        `✅ Webhook final de campanha disparado (campaign=${campaign.id}, total=${totalContacts})`,
+        `✅ Webhook final de campanha disparado (campaign=${campaign.id}, successMessages=${options.successMessages?.length ?? 0}, failedMessages=${options.failedMessages?.length ?? 0})`,
       );
     }
     this.logger.debug(`Payload do webhook: ${JSON.stringify(payload, null, 2)}`);

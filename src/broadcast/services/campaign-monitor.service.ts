@@ -119,8 +119,8 @@ export class CampaignMonitorService implements OnModuleInit {
     // Se não tem cache ou mudou, envia webhook
     if (!cachedChecksum || cachedChecksum !== currentChecksum) {
       this.logger.log(`📢 Campanha ${campaign.id} (${campaign.name}) mudou - enviando webhook`);
-      this.logger.debug(
-        `   Status: ${campaign.status} | sent=${campaign.sentCount}, delivered=${campaign.deliveredCount}, read=${campaign.readCount}, failed=${campaign.failedCount}`,
+      this.logger.log(
+        `   📊 Status: ${campaign.status} | sent=${campaign.sentCount}, delivered=${campaign.deliveredCount}, read=${campaign.readCount}, failed=${campaign.failedCount}`,
       );
 
       // Atualiza cache
@@ -133,6 +133,8 @@ export class CampaignMonitorService implements OnModuleInit {
           status: campaign.status,
           totalContacts: campaign.totalRecipients,
           sentContacts: campaign.sentCount,
+          deliveredContacts: campaign.deliveredCount,
+          readContacts: campaign.readCount,
           failedContacts: campaign.failedCount,
         });
 

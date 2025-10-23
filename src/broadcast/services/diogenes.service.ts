@@ -21,6 +21,16 @@ export interface TemplateParameter {
   text?: string;
   [key: string]: any;
 }
+export interface TemplateComponentDefinition {
+  type: string;
+  parameters?: Array<{ type: string; text?: string; [key: string]: any }>;
+  text?: string;
+  format?: string;
+  buttons?: Array<{ type: string; url?: string }>;
+  sub_type?: string;
+  subType?: string;
+  index?: number | string;
+}
 
 export interface DiogenesResponse {
   key: {
@@ -135,7 +145,9 @@ export class DiogenesService {
       return components;
     }
 
-    for (const rawComponent of templateData.components) {
+    const componentDefinitions: TemplateComponentDefinition[] = templateData.components;
+
+    for (const rawComponent of componentDefinitions) {
       if (!rawComponent) {
         continue;
       }
@@ -143,25 +155,25 @@ export class DiogenesService {
       const normalizedType = this.normalizeComponentType(rawComponent.type);
 
       if (Array.isArray(rawComponent.parameters)) {
-        const resolvedParameters = this.resolveComponentParameters(
-          rawComponent.parameters,
+        const resolvedParameters = this.resolveComponentParameters(rawComponent.parameters);
+        const normalizedParameters = this.applyTemplateVariables(
+          resolvedParameters,
           recipientVariables,
         );
 
-        components.push({
-          type: normalizedType,
-          sub_type: rawComponent.sub_type ?? rawComponent.subType,
-          index:
-            rawComponent.index !== undefined && rawComponent.index !== null
-              ? String(rawComponent.index)
-              : undefined,
-          parameters: resolvedParameters,
-        });
+        components.push(
+          this.decorateComponent(
+            normalizedType,
+            normalizedParameters,
+            rawComponent.sub_type ?? rawComponent.subType,
+            rawComponent.index,
+          ),
+        );
         continue;
       }
 
       if (normalizedType === 'header' && rawComponent.format?.toUpperCase() === 'TEXT') {
-        const headerParams = this.extractVariables(rawComponent.text, recipientVariables);
+        const headerParams = this.extractVariables(rawComponent.text ?? '', recipientVariables);
         if (headerParams.length > 0) {
           components.push({
             type: 'header',
@@ -172,22 +184,21 @@ export class DiogenesService {
       }
 
       if (normalizedType === 'body') {
-        const bodyParams = this.extractVariables(rawComponent.text, recipientVariables);
+        const bodyParams = this.extractVariables(rawComponent.text ?? '', recipientVariables);
         if (bodyParams.length > 0) {
           components.push({
             type: 'body',
             parameters: bodyParams.map((text) => ({ type: 'text', text })),
           });
         } else if (rawComponent.text) {
-          components.push({
-            type: 'body',
-            parameters: [
+          components.push(
+            this.decorateComponent('body', [
               {
                 type: 'text',
                 text: this.resolveTemplateText(rawComponent.text, recipientVariables),
               },
-            ],
-          });
+            ]),
+          );
         }
         continue;
       }
@@ -246,23 +257,13 @@ export class DiogenesService {
     return 'text';
   }
 
-  private resolveComponentParameters(
-    parameters: any[],
-    recipientVariables: Record<string, any>,
-  ): TemplateParameter[] {
+  private resolveComponentParameters(parameters: any[]): TemplateParameter[] {
     if (!Array.isArray(parameters)) {
       return [];
     }
 
     return parameters.map((param) => {
       const normalizedType = this.normalizeParameterType(param?.type);
-
-      if (normalizedType === 'text') {
-        return {
-          type: 'text',
-          text: this.resolveTemplateText(param?.text ?? '', recipientVariables),
-        };
-      }
 
       const sanitizedParam: TemplateParameter = { type: normalizedType };
 
@@ -277,6 +278,36 @@ export class DiogenesService {
 
       return sanitizedParam;
     });
+  }
+
+  private applyTemplateVariables(
+    parameters: TemplateParameter[],
+    recipientVariables: Record<string, any>,
+  ): TemplateParameter[] {
+    return parameters.map((param) => {
+      if (param.type !== 'text') {
+        return param;
+      }
+
+      return {
+        ...param,
+        text: this.resolveTemplateText(param.text ?? '', recipientVariables),
+      };
+    });
+  }
+
+  private decorateComponent(
+    type: string,
+    parameters: TemplateParameter[],
+    subType?: string,
+    index?: string | number,
+  ): TemplateComponent {
+    return {
+      type,
+      sub_type: subType,
+      index: index !== undefined && index !== null ? String(index) : undefined,
+      parameters,
+    };
   }
 
   private resolveTemplateText(text: string, variables: Record<string, any>): string {

@@ -55,7 +55,7 @@ export class QueueService {
         recipientId: recipient.id,
         recipientPhone: recipient.phoneNumber,
         recipientName: recipient.name || 'Cliente',
-        recipientVariables: (recipient.variables as Record<string, any>) || {},
+        recipientVariables: this.buildRecipientVariables(recipient),
         templateData: templateData,
         channel: campaign.channel,
         templateName: templateData.name || campaign.templateId,
@@ -164,5 +164,59 @@ export class QueueService {
       removed: campaignJobs.length,
       message: `${campaignJobs.length} jobs removidos da fila`,
     };
+  }
+
+  private buildRecipientVariables(recipient: {
+    name: string | null;
+    variables: any;
+    email?: string | null;
+  }): Record<string, any> {
+    const variables = this.normalizeVariables(recipient.variables);
+    const fallbackName = recipient.name ?? 'Cliente';
+
+    const nameValue = String(fallbackName);
+
+    if (!variables.NAME) {
+      variables.NAME = nameValue;
+    }
+
+    if (!variables.name) {
+      variables.name = nameValue;
+    }
+
+    if (!variables['1']) {
+      variables['1'] = nameValue;
+    }
+
+    if (recipient.email && !variables.email) {
+      variables.email = String(recipient.email);
+    }
+
+    return variables;
+  }
+
+  private normalizeVariables(rawVariables: any): Record<string, any> {
+    if (!rawVariables) {
+      return {};
+    }
+
+    if (typeof rawVariables === 'string') {
+      try {
+        const parsed = JSON.parse(rawVariables);
+        return this.normalizeVariables(parsed);
+      } catch (error) {
+        this.logger.warn(
+          `Não foi possível converter variáveis do destinatário: ${rawVariables}`,
+          error instanceof Error ? error.message : String(error),
+        );
+        return {};
+      }
+    }
+
+    if (typeof rawVariables === 'object' && !Array.isArray(rawVariables)) {
+      return { ...(rawVariables as Record<string, any>) };
+    }
+
+    return {};
   }
 }

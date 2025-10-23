@@ -352,8 +352,8 @@ export class WebhookService {
         updateData.readCount = { increment: 1 };
         break;
       case 'FAILED':
-        // Só incrementa se não havia status anterior (primeira vez falhando)
-        if (!previousStatus) {
+        // Incrementa apenas quando entramos em falha pela primeira vez
+        if (previousStatus !== 'FAILED') {
           updateData.failedCount = { increment: 1 };
         }
         break;

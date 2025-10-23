@@ -18,7 +18,8 @@ export interface TemplateComponent {
 
 export interface TemplateParameter {
   type: string;
-  text: string;
+  text?: string;
+  [key: string]: any;
 }
 
 export interface DiogenesResponse {
@@ -130,37 +131,70 @@ export class DiogenesService {
   ): TemplateComponent[] {
     const components: TemplateComponent[] = [];
 
-    if (!templateData.components) {
+    if (!templateData || !Array.isArray(templateData.components)) {
       return components;
     }
 
-    for (const component of templateData.components) {
-      if (component.type === 'HEADER' && component.format === 'TEXT') {
-        // Header com texto
-        const headerParams = this.extractVariables(component.text, recipientVariables);
+    for (const rawComponent of templateData.components) {
+      if (!rawComponent) {
+        continue;
+      }
+
+      const normalizedType = this.normalizeComponentType(rawComponent.type);
+
+      if (Array.isArray(rawComponent.parameters)) {
+        const resolvedParameters = this.resolveComponentParameters(
+          rawComponent.parameters,
+          recipientVariables,
+        );
+
+        components.push({
+          type: normalizedType,
+          sub_type: rawComponent.sub_type ?? rawComponent.subType,
+          index:
+            rawComponent.index !== undefined && rawComponent.index !== null
+              ? String(rawComponent.index)
+              : undefined,
+          parameters: resolvedParameters,
+        });
+        continue;
+      }
+
+      if (normalizedType === 'header' && rawComponent.format?.toUpperCase() === 'TEXT') {
+        const headerParams = this.extractVariables(rawComponent.text, recipientVariables);
         if (headerParams.length > 0) {
           components.push({
             type: 'header',
             parameters: headerParams.map((text) => ({ type: 'text', text })),
           });
         }
+        continue;
       }
 
-      if (component.type === 'BODY') {
-        // Body com variáveis
-        const bodyParams = this.extractVariables(component.text, recipientVariables);
+      if (normalizedType === 'body') {
+        const bodyParams = this.extractVariables(rawComponent.text, recipientVariables);
         if (bodyParams.length > 0) {
           components.push({
             type: 'body',
             parameters: bodyParams.map((text) => ({ type: 'text', text })),
           });
+        } else if (rawComponent.text) {
+          components.push({
+            type: 'body',
+            parameters: [
+              {
+                type: 'text',
+                text: this.resolveTemplateText(rawComponent.text, recipientVariables),
+              },
+            ],
+          });
         }
+        continue;
       }
 
-      if (component.type === 'BUTTONS' && component.buttons) {
-        // Buttons com URLs dinâmicas
-        component.buttons.forEach((button: any, index: number) => {
-          if (button.type === 'URL' && button.url.includes('{{')) {
+      if (normalizedType === 'buttons' && Array.isArray(rawComponent.buttons)) {
+        rawComponent.buttons.forEach((button: any, index: number) => {
+          if (button.type === 'URL' && typeof button.url === 'string') {
             const urlParams = this.extractVariables(button.url, recipientVariables);
             if (urlParams.length > 0) {
               components.push({
@@ -183,23 +217,114 @@ export class DiogenesService {
    * Suporta: {{1}}, {{2}}, {{nome}}, etc
    */
   private extractVariables(text: string, variables: Record<string, any>): string[] {
-    const matches = text.match(/\{\{(\d+|[a-zA-Z_]+)\}\}/g);
+    if (typeof text !== 'string') {
+      return [];
+    }
+
+    const matches = text.match(/\{\{(\d+|[a-zA-Z_][\w-]*)\}\}/g);
     if (!matches) {
       return [];
     }
 
     return matches.map((match) => {
       const key = match.replace(/\{\{|\}\}/g, '');
+      return this.getVariableValue(key, variables);
+    });
+  }
 
-      // Se for número ({{1}}, {{2}}), usa o índice das variáveis
-      if (/^\d+$/.test(key)) {
-        const index = parseInt(key) - 1;
-        const variableKeys = Object.keys(variables);
-        return variables[variableKeys[index]] || '';
+  private normalizeComponentType(type: any): string {
+    if (typeof type === 'string') {
+      return type.toLowerCase();
+    }
+    return 'body';
+  }
+
+  private normalizeParameterType(type: any): string {
+    if (typeof type === 'string') {
+      return type.toLowerCase();
+    }
+    return 'text';
+  }
+
+  private resolveComponentParameters(
+    parameters: any[],
+    recipientVariables: Record<string, any>,
+  ): TemplateParameter[] {
+    if (!Array.isArray(parameters)) {
+      return [];
+    }
+
+    return parameters.map((param) => {
+      const normalizedType = this.normalizeParameterType(param?.type);
+
+      if (normalizedType === 'text') {
+        return {
+          type: 'text',
+          text: this.resolveTemplateText(param?.text ?? '', recipientVariables),
+        };
       }
 
-      // Se for nome de variável ({{nome}}, {{email}})
-      return variables[key] || '';
+      const sanitizedParam: TemplateParameter = { type: normalizedType };
+
+      if (param && typeof param === 'object') {
+        for (const [key, value] of Object.entries(param)) {
+          if (key === 'type') {
+            continue;
+          }
+          sanitizedParam[key] = value;
+        }
+      }
+
+      return sanitizedParam;
     });
+  }
+
+  private resolveTemplateText(text: string, variables: Record<string, any>): string {
+    if (typeof text !== 'string') {
+      return '';
+    }
+
+    const placeholderRegex = /\{\{(\d+|[a-zA-Z_][\w-]*)\}\}/g;
+
+    return text.replace(placeholderRegex, (_, key: string) =>
+      this.getVariableValue(key, variables),
+    );
+  }
+
+  private getVariableValue(key: string, variables: Record<string, any>): string {
+    if (!variables || typeof variables !== 'object') {
+      return '';
+    }
+
+    const normalizedKey = key.toString();
+
+    if (Object.prototype.hasOwnProperty.call(variables, normalizedKey)) {
+      return this.normalizeVariableValue(variables[normalizedKey]);
+    }
+
+    const lowerKey = normalizedKey.toLowerCase();
+    for (const [varKey, value] of Object.entries(variables)) {
+      if (varKey.toLowerCase() === lowerKey) {
+        return this.normalizeVariableValue(value);
+      }
+    }
+
+    if (/^\d+$/.test(normalizedKey)) {
+      const numericIndex = parseInt(normalizedKey, 10) - 1;
+      const variableValues = Object.values(variables);
+      if (numericIndex >= 0 && numericIndex < variableValues.length) {
+        return this.normalizeVariableValue(variableValues[numericIndex]);
+      }
+    }
+
+    return '';
+  }
+
+  private normalizeVariableValue(value: any): string {
+    if (value === null || value === undefined) {
+      return '';
+    }
+
+    return String(value);
   }
 }

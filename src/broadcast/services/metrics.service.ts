@@ -182,7 +182,9 @@ export class MetricsService {
       campaign.sentCount > 0 ? (campaign.deliveredCount / campaign.sentCount) * 100 : 0;
 
     const readRate =
-      campaign.deliveredCount > 0 ? (campaign.readCount / campaign.deliveredCount) * 100 : 0;
+      campaign.sentCount > 0
+        ? (Math.min(campaign.readCount, campaign.sentCount) / campaign.sentCount) * 100
+        : 0;
 
     const failureRate =
       campaign.totalRecipients > 0 ? (campaign.failedCount / campaign.totalRecipients) * 100 : 0;

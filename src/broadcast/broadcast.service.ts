@@ -347,6 +347,10 @@ export class BroadcastService {
               sentAt: true,
               deliveredAt: true,
               readAt: true,
+              failedAt: true,
+              errorCode: true,
+              errorMessage: true,
+              errorDetails: true,
             },
           },
         },
@@ -509,10 +513,10 @@ export class BroadcastService {
         ? ((campaign.deliveredCount / campaign.sentCount) * 100).toFixed(2)
         : '0.00';
 
-    // Taxa de leitura: mensagens lidas / mensagens entregues
+    // Taxa de leitura: mensagens lidas / mensagens enviadas (não pode exceder 100%)
     const readRate =
-      campaign.deliveredCount > 0
-        ? ((campaign.readCount / campaign.deliveredCount) * 100).toFixed(2)
+      campaign.sentCount > 0
+        ? ((Math.min(campaign.readCount, campaign.sentCount) / campaign.sentCount) * 100).toFixed(2)
         : '0.00';
 
     // Taxa de falha: mensagens falhadas / total de tentativas

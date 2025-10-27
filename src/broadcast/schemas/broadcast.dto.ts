@@ -218,11 +218,39 @@ export class CampaignStatsDto {
     read: number;
     failed: number;
     pending: number;
+    responded: number;
+    optedOut: number;
   };
   rates: {
     success: string;
     delivery: string;
     read: string;
     failure: string;
+    response: string;
+    optOut: string;
+  };
+  responseTimes: {
+    averageSeconds: number;
+    averageMinutes: number;
+    averageHumanized: string;
+  };
+  engagement: {
+    buttonClicks: {
+      total: number;
+      uniqueContacts: number;
+      rate: string;
+    };
+    hourlyDistribution: Array<{
+      hour: number;
+      responses: number;
+      reads: number;
+      engagementScore: number;
+    }>;
+    bestHours: Array<{
+      hour: number;
+      responses: number;
+      reads: number;
+      engagementScore: number;
+    }>;
   };
 }

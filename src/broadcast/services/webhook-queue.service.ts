@@ -1,7 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
-import { MetaWebhookJob, DiogenesWebhookJob } from '../queues/webhook.processor';
+import {
+  MetaWebhookJob,
+  DiogenesWebhookJob,
+  MetaMessageWebhookJob,
+} from '../queues/webhook.processor';
 
 @Injectable()
 export class WebhookQueueService {
@@ -66,6 +70,38 @@ export class WebhookQueueService {
 
     // Log apenas em debug
     this.logger.debug(`📤 Webhook Diogenes na fila - Job: ${job.id} - Event: ${payload.event}`);
+
+    return job.id || '';
+  }
+
+  /**
+   * Adiciona mensagens recebidas do Meta à fila
+   */
+  async addMetaMessage(
+    message: MetaMessageWebhookJob['message'],
+    metadata: MetaMessageWebhookJob['metadata'],
+  ): Promise<string> {
+    const job = await this.webhookQueue.add(
+      'process-meta-message',
+      {
+        type: 'meta-message',
+        message,
+        metadata,
+      } as MetaMessageWebhookJob,
+      {
+        attempts: 3,
+        backoff: {
+          type: 'exponential',
+          delay: 2000,
+        },
+        removeOnComplete: 100,
+        removeOnFail: 500,
+      },
+    );
+
+    this.logger.debug(
+      `📤 Mensagem Meta na fila - Job: ${job.id} - From: ${message?.from ?? 'unknown'}`,
+    );
 
     return job.id || '';
   }

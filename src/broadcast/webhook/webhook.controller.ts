@@ -1,4 +1,5 @@
 import { Controller, Post, Body, Logger, Get } from '@nestjs/common';
+import { ApiBody, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { WebhookQueueService } from '../services/webhook-queue.service';
 
 // Formato oficial do Meta WhatsApp Business API
@@ -67,6 +68,7 @@ export interface DiogenesWebhookDto {
   apikey?: string;
 }
 
+@ApiTags('Webhooks')
 @Controller('webhook')
 export class WebhookController {
   private readonly logger = new Logger(WebhookController.name);
@@ -80,6 +82,35 @@ export class WebhookController {
    * Os webhooks são adicionados a uma fila para processamento assíncrono
    */
   @Post('campaign-status')
+  @ApiOperation({ summary: 'Recebe webhooks do Meta WhatsApp Business API' })
+  @ApiBody({
+    required: true,
+    description: 'Payload enviado pelo Meta WhatsApp Business API',
+    schema: {
+      type: 'object',
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Webhook processado e adicionado à fila',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        jobIds: { type: 'array', items: { type: 'string' } },
+        count: { type: 'number' },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 500,
+    description: 'Erro ao processar webhook',
+    schema: {
+      type: 'object',
+      properties: { success: { type: 'boolean' }, error: { type: 'string' } },
+    },
+  })
   async handleCampaignStatus(@Body() payload: MetaWhatsAppWebhookDto) {
     // Log resumido no terminal
     this.logger.debug(`📥 Webhook Meta recebido: ${payload.object}`);
@@ -106,8 +137,18 @@ export class WebhookController {
           }
 
           if (change.value.messages) {
-            // Log de mensagens recebidas (futuro: adicionar à fila também)
-            this.logger.debug(`💬 Mensagens recebidas: ${change.value.messages.length}`);
+            for (const message of change.value.messages) {
+              this.logger.debug(
+                `➕ Fila - mensagem recebida ${message.id} - ${message.from ?? 'unknown'}`,
+              );
+
+              const jobId = await this.webhookQueueService.addMetaMessage(
+                message,
+                change.value.metadata,
+              );
+
+              jobIds.push(jobId);
+            }
           }
         }
       }
@@ -132,6 +173,34 @@ export class WebhookController {
    * Os webhooks são adicionados a uma fila para processamento assíncrono
    */
   @Post('diogenes')
+  @ApiOperation({ summary: 'Recebe webhooks no formato legado Diogenes' })
+  @ApiBody({
+    required: true,
+    description: 'Payload legado do Diogenes',
+    schema: {
+      type: 'object',
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Webhook legado adicionado à fila',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        jobId: { type: 'string' },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 500,
+    description: 'Erro ao adicionar webhook legado',
+    schema: {
+      type: 'object',
+      properties: { success: { type: 'boolean' }, error: { type: 'string' } },
+    },
+  })
   async handleDiogenesWebhook(@Body() payload: DiogenesWebhookDto) {
     this.logger.debug(`📥 Webhook Diogenes: ${payload.event}`);
 
@@ -156,6 +225,26 @@ export class WebhookController {
    * Obtém estatísticas da fila de webhooks
    */
   @Get('queue/stats')
+  @ApiOperation({ summary: 'Obtém métricas da fila de processamento de webhooks' })
+  @ApiResponse({
+    status: 200,
+    description: 'Estatísticas retornadas com sucesso',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        stats: { type: 'object' },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 500,
+    description: 'Erro ao obter estatísticas',
+    schema: {
+      type: 'object',
+      properties: { success: { type: 'boolean' }, error: { type: 'string' } },
+    },
+  })
   async getQueueStats() {
     try {
       const stats = await this.webhookQueueService.getQueueStats();
@@ -176,6 +265,26 @@ export class WebhookController {
    * Endpoint de teste para simular webhooks
    */
   @Post('test')
+  @ApiOperation({ summary: 'Recebe um payload de teste para validação' })
+  @ApiBody({
+    required: true,
+    description: 'Payload arbitrário para simular webhooks',
+    schema: {
+      type: 'object',
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Webhook de teste recebido',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        payload: { type: 'object' },
+      },
+    },
+  })
   testWebhook(@Body() payload: any) {
     this.logger.log('🧪 Webhook de teste recebido');
     return {

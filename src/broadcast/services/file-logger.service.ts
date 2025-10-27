@@ -4,7 +4,7 @@ import * as path from 'path';
 
 export interface WebhookLogEntry {
   timestamp: string;
-  type: 'meta' | 'diogenes';
+  type: 'meta' | 'meta-message' | 'diogenes';
   messageId: string;
   status: string;
   recipient: string;

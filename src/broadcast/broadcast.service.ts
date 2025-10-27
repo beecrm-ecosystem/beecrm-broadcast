@@ -504,8 +504,15 @@ export class BroadcastService {
    */
   async getCampaignStats(id: string): Promise<CampaignStatsDto> {
     const campaign = await this.findOne(id);
+    const respondedCount = (campaign as any).respondedCount ?? 0;
+    const optOutCount = (campaign as any).optOutCount ?? 0;
+    const responseTimeTotalSeconds = (campaign as any).responseTimeTotalSeconds ?? 0;
+    const averageResponseTimeSeconds =
+      respondedCount > 0 ? responseTimeTotalSeconds / respondedCount : 0;
 
     const pending = campaign.totalRecipients - campaign.sentCount - campaign.failedCount;
+
+    const engagement = await this.computeEngagementInsights(campaign);
 
     // Taxa de entrega: mensagens entregues / mensagens enviadas com sucesso
     const deliveryRate =
@@ -523,6 +530,16 @@ export class BroadcastService {
     const failureRate =
       campaign.totalRecipients > 0
         ? ((campaign.failedCount / campaign.totalRecipients) * 100).toFixed(2)
+        : '0.00';
+
+    const responseRate =
+      campaign.totalRecipients > 0
+        ? ((respondedCount / campaign.totalRecipients) * 100).toFixed(2)
+        : '0.00';
+
+    const optOutRate =
+      campaign.totalRecipients > 0
+        ? ((optOutCount / campaign.totalRecipients) * 100).toFixed(2)
         : '0.00';
 
     // Taxa de sucesso: mensagens enviadas / total de tentativas
@@ -546,14 +563,148 @@ export class BroadcastService {
         read: campaign.readCount,
         failed: campaign.failedCount,
         pending,
+        responded: respondedCount,
+        optedOut: optOutCount,
       },
       rates: {
         success: `${successRate}%`,
         delivery: `${deliveryRate}%`,
         read: `${readRate}%`,
         failure: `${failureRate}%`,
+        response: `${responseRate}%`,
+        optOut: `${optOutRate}%`,
+      },
+      responseTimes: {
+        averageSeconds: Number(averageResponseTimeSeconds.toFixed(2)),
+        averageMinutes: Number((averageResponseTimeSeconds / 60).toFixed(2)),
+        averageHumanized: this.formatDuration(averageResponseTimeSeconds),
+      },
+      engagement: {
+        buttonClicks: {
+          total: engagement.buttonClickCount,
+          uniqueContacts: engagement.uniqueButtonClickContacts,
+          rate: `${engagement.buttonClickRate.toFixed(2)}%`,
+        },
+        hourlyDistribution: engagement.hourlyDistribution,
+        bestHours: engagement.bestHours,
       },
     };
+  }
+
+  private async computeEngagementInsights(campaign: {
+    id: string;
+    sentCount: number;
+    totalRecipients: number;
+  }): Promise<{
+    buttonClickCount: number;
+    uniqueButtonClickContacts: number;
+    buttonClickRate: number;
+    hourlyDistribution: Array<{
+      hour: number;
+      responses: number;
+      reads: number;
+      engagementScore: number;
+    }>;
+    bestHours: Array<{
+      hour: number;
+      responses: number;
+      reads: number;
+      engagementScore: number;
+    }>;
+  }> {
+    const [responses, readMessages] = await Promise.all([
+      this.prisma.campaignResponse.findMany({
+        where: { campaignId: campaign.id },
+        select: {
+          responseType: true,
+          receivedAt: true,
+          recipientId: true,
+          fromPhone: true,
+        },
+      }),
+      this.prisma.message.findMany({
+        where: { campaignId: campaign.id, readAt: { not: null } },
+        select: {
+          readAt: true,
+        },
+      }),
+    ]);
+
+    let buttonClickCount = 0;
+    const buttonClickContacts = new Set<string>();
+
+    const hourlyCounters = Array.from({ length: 24 }, (_, hour) => ({
+      hour,
+      responses: 0,
+      reads: 0,
+    }));
+
+    const trackHour = (date: Date | null | undefined, field: 'responses' | 'reads') => {
+      if (!date) {
+        return;
+      }
+
+      const hour = date.getHours();
+      const bucket = hourlyCounters[hour];
+      bucket[field] += 1;
+    };
+
+    for (const response of responses) {
+      trackHour(response.receivedAt, 'responses');
+
+      if (this.isButtonClickResponse(response.responseType)) {
+        buttonClickCount += 1;
+
+        const contactKey = response.recipientId
+          ? `recipient:${response.recipientId}`
+          : response.fromPhone
+            ? `phone:${response.fromPhone}`
+            : null;
+
+        if (contactKey) {
+          buttonClickContacts.add(contactKey);
+        }
+      }
+    }
+
+    for (const message of readMessages) {
+      trackHour(message.readAt, 'reads');
+    }
+
+    const hourlyDistribution = hourlyCounters.map((bucket) => ({
+      ...bucket,
+      engagementScore: bucket.responses + bucket.reads,
+    }));
+
+    const bestHours = hourlyDistribution
+      .filter((bucket) => bucket.engagementScore > 0)
+      .sort((a, b) => {
+        if (b.engagementScore !== a.engagementScore) {
+          return b.engagementScore - a.engagementScore;
+        }
+        return a.hour - b.hour;
+      })
+      .slice(0, 3);
+
+    const denominator = campaign.sentCount > 0 ? campaign.sentCount : campaign.totalRecipients;
+    const buttonClickRate = denominator > 0 ? (buttonClickContacts.size / denominator) * 100 : 0;
+
+    return {
+      buttonClickCount,
+      uniqueButtonClickContacts: buttonClickContacts.size,
+      buttonClickRate,
+      hourlyDistribution,
+      bestHours,
+    };
+  }
+
+  private isButtonClickResponse(responseType?: string | null): boolean {
+    if (!responseType) {
+      return false;
+    }
+
+    const normalized = responseType.toLowerCase();
+    return normalized.startsWith('interactive:button') || normalized.includes('button_reply');
   }
 
   private ensureFutureScheduledDate(rawDate: string | Date): Date {
@@ -586,5 +737,29 @@ export class BroadcastService {
     }
 
     return Object.keys(sanitized).length > 0 ? sanitized : undefined;
+  }
+
+  private formatDuration(seconds: number): string {
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      return '0s';
+    }
+
+    const totalSeconds = Math.round(seconds);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const secs = totalSeconds % 60;
+
+    const parts: string[] = [];
+    if (hours > 0) {
+      parts.push(`${hours}h`);
+    }
+    if (minutes > 0) {
+      parts.push(`${minutes}m`);
+    }
+    if (secs > 0 || parts.length === 0) {
+      parts.push(`${secs}s`);
+    }
+
+    return parts.join(' ');
   }
 }

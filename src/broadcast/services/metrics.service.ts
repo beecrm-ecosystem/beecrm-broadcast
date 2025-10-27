@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
 import { CampaignStatus } from '@prisma/client';
 
@@ -11,6 +11,9 @@ export interface CampaignMetrics {
   deliveredCount: number;
   readCount: number;
   failedCount: number;
+  responsesCount: number;
+  respondedCount: number;
+  optOutCount: number;
   pendingCount: number;
   progress: number;
   rates: {
@@ -18,11 +21,19 @@ export interface CampaignMetrics {
     delivery: number;
     read: number;
     failure: number;
+    response: number;
+    optOut: number;
   };
   timestamps: {
     createdAt: Date;
     startedAt: Date | null;
     completedAt: Date | null;
+    lastResponseAt: Date | null;
+  };
+  responseTimes: {
+    averageSeconds: number;
+    averageMinutes: number;
+    averageHumanized: string;
   };
 }
 
@@ -41,7 +52,7 @@ export class MetricsService {
     });
 
     if (!campaign) {
-      throw new Error(`Campanha ${campaignId} não encontrada`);
+      throw new NotFoundException(`Campanha ${campaignId} não encontrada`);
     }
 
     return this.buildMetrics(campaign);
@@ -86,7 +97,14 @@ export class MetricsService {
     totalMessages: number;
     sentMessages: number;
     failedMessages: number;
+    responsesCount: number;
+    respondedContacts: number;
+    optOutCount: number;
     successRate: number;
+    responseRate: number;
+    optOutRate: number;
+    averageResponseTimeSeconds: number;
+    averageResponseTimeHumanized: string;
   }> {
     const campaigns = await this.prisma.campaign.findMany({
       where: { channel, deletedAt: null },
@@ -100,8 +118,22 @@ export class MetricsService {
     const totalMessages = campaigns.reduce((sum, c) => sum + c.totalRecipients, 0);
     const sentMessages = campaigns.reduce((sum, c) => sum + c.sentCount, 0);
     const failedMessages = campaigns.reduce((sum, c) => sum + c.failedCount, 0);
+    const responsesCount = campaigns.reduce((sum, c) => sum + ((c as any).responsesCount ?? 0), 0);
+    const respondedContacts = campaigns.reduce(
+      (sum, c) => sum + ((c as any).respondedCount ?? 0),
+      0,
+    );
+    const optOutCount = campaigns.reduce((sum, c) => sum + ((c as any).optOutCount ?? 0), 0);
+    const totalResponseTimeSeconds = campaigns.reduce(
+      (sum, c) => sum + ((c as any).responseTimeTotalSeconds ?? 0),
+      0,
+    );
 
     const successRate = totalMessages > 0 ? (sentMessages / totalMessages) * 100 : 0;
+    const responseRate = totalMessages > 0 ? (respondedContacts / totalMessages) * 100 : 0;
+    const optOutRate = totalMessages > 0 ? (optOutCount / totalMessages) * 100 : 0;
+    const averageResponseTimeSeconds =
+      respondedContacts > 0 ? totalResponseTimeSeconds / respondedContacts : 0;
 
     return {
       channel,
@@ -110,7 +142,14 @@ export class MetricsService {
       totalMessages,
       sentMessages,
       failedMessages,
+      responsesCount,
+      respondedContacts,
+      optOutCount,
       successRate: Number(successRate.toFixed(2)),
+      responseRate: Number(responseRate.toFixed(2)),
+      optOutRate: Number(optOutRate.toFixed(2)),
+      averageResponseTimeSeconds: Number(averageResponseTimeSeconds.toFixed(2)),
+      averageResponseTimeHumanized: this.formatDuration(averageResponseTimeSeconds),
     };
   }
 
@@ -125,9 +164,16 @@ export class MetricsService {
     failedMessages: number;
     deliveredMessages: number;
     readMessages: number;
+    responsesCount: number;
+    respondedContacts: number;
+    optOutCount: number;
     successRate: number;
     deliveryRate: number;
     readRate: number;
+    responseRate: number;
+    optOutRate: number;
+    averageResponseTimeSeconds: number;
+    averageResponseTimeHumanized: string;
   }> {
     const campaigns = await this.prisma.campaign.findMany({
       where: { deletedAt: null },
@@ -146,10 +192,24 @@ export class MetricsService {
     const failedMessages = campaigns.reduce((sum, c) => sum + c.failedCount, 0);
     const deliveredMessages = campaigns.reduce((sum, c) => sum + c.deliveredCount, 0);
     const readMessages = campaigns.reduce((sum, c) => sum + c.readCount, 0);
+    const responsesCount = campaigns.reduce((sum, c) => sum + ((c as any).responsesCount ?? 0), 0);
+    const respondedContacts = campaigns.reduce(
+      (sum, c) => sum + ((c as any).respondedCount ?? 0),
+      0,
+    );
+    const optOutCount = campaigns.reduce((sum, c) => sum + ((c as any).optOutCount ?? 0), 0);
+    const totalResponseTimeSeconds = campaigns.reduce(
+      (sum, c) => sum + ((c as any).responseTimeTotalSeconds ?? 0),
+      0,
+    );
 
     const successRate = totalMessages > 0 ? (sentMessages / totalMessages) * 100 : 0;
     const deliveryRate = sentMessages > 0 ? (deliveredMessages / sentMessages) * 100 : 0;
     const readRate = deliveredMessages > 0 ? (readMessages / deliveredMessages) * 100 : 0;
+    const responseRate = totalMessages > 0 ? (respondedContacts / totalMessages) * 100 : 0;
+    const optOutRate = totalMessages > 0 ? (optOutCount / totalMessages) * 100 : 0;
+    const averageResponseTimeSeconds =
+      respondedContacts > 0 ? totalResponseTimeSeconds / respondedContacts : 0;
 
     return {
       total: campaigns.length,
@@ -159,9 +219,16 @@ export class MetricsService {
       failedMessages,
       deliveredMessages,
       readMessages,
+      responsesCount,
+      respondedContacts,
+      optOutCount,
       successRate: Number(successRate.toFixed(2)),
       deliveryRate: Number(deliveryRate.toFixed(2)),
       readRate: Number(readRate.toFixed(2)),
+      responseRate: Number(responseRate.toFixed(2)),
+      optOutRate: Number(optOutRate.toFixed(2)),
+      averageResponseTimeSeconds: Number(averageResponseTimeSeconds.toFixed(2)),
+      averageResponseTimeHumanized: this.formatDuration(averageResponseTimeSeconds),
     };
   }
 
@@ -170,6 +237,13 @@ export class MetricsService {
    */
   private buildMetrics(campaign: any): CampaignMetrics {
     const pendingCount = campaign.totalRecipients - campaign.sentCount - campaign.failedCount;
+    const responsesCount = campaign.responsesCount ?? 0;
+    const respondedCount = campaign.respondedCount ?? 0;
+    const responseTimeTotalSeconds = campaign.responseTimeTotalSeconds ?? 0;
+    const optOutCount = campaign.optOutCount ?? 0;
+    const averageResponseSeconds =
+      respondedCount > 0 ? responseTimeTotalSeconds / respondedCount : 0;
+    const lastResponseAt = campaign.lastResponseAt ?? null;
     const progress =
       campaign.totalRecipients > 0
         ? ((campaign.sentCount + campaign.failedCount) / campaign.totalRecipients) * 100
@@ -189,6 +263,11 @@ export class MetricsService {
     const failureRate =
       campaign.totalRecipients > 0 ? (campaign.failedCount / campaign.totalRecipients) * 100 : 0;
 
+    const responseRate =
+      campaign.totalRecipients > 0 ? (respondedCount / campaign.totalRecipients) * 100 : 0;
+    const optOutRate =
+      campaign.totalRecipients > 0 ? (optOutCount / campaign.totalRecipients) * 100 : 0;
+
     return {
       campaignId: campaign.id,
       name: campaign.name,
@@ -198,6 +277,9 @@ export class MetricsService {
       deliveredCount: campaign.deliveredCount,
       readCount: campaign.readCount,
       failedCount: campaign.failedCount,
+      responsesCount,
+      respondedCount,
+      optOutCount,
       pendingCount,
       progress: Number(progress.toFixed(2)),
       rates: {
@@ -205,12 +287,44 @@ export class MetricsService {
         delivery: Number(deliveryRate.toFixed(2)),
         read: Number(readRate.toFixed(2)),
         failure: Number(failureRate.toFixed(2)),
+        response: Number(responseRate.toFixed(2)),
+        optOut: Number(optOutRate.toFixed(2)),
       },
       timestamps: {
         createdAt: campaign.createdAt,
         startedAt: campaign.startedAt,
         completedAt: campaign.completedAt,
+        lastResponseAt,
+      },
+      responseTimes: {
+        averageSeconds: Number(averageResponseSeconds.toFixed(2)),
+        averageMinutes: Number((averageResponseSeconds / 60).toFixed(2)),
+        averageHumanized: this.formatDuration(averageResponseSeconds),
       },
     };
+  }
+
+  private formatDuration(seconds: number): string {
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      return '0s';
+    }
+
+    const totalSeconds = Math.round(seconds);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const secs = totalSeconds % 60;
+
+    const parts: string[] = [];
+    if (hours > 0) {
+      parts.push(`${hours}h`);
+    }
+    if (minutes > 0) {
+      parts.push(`${minutes}m`);
+    }
+    if (secs > 0 || parts.length === 0) {
+      parts.push(`${secs}s`);
+    }
+
+    return parts.join(' ');
   }
 }

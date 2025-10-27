@@ -20,6 +20,56 @@ interface MetaMetadata {
   phone_number_id: string;
 }
 
+interface MetaIncomingMessage {
+  id: string;
+  from?: string;
+  timestamp?: string;
+  type: string;
+  text?: {
+    body: string;
+  };
+  interactive?: {
+    type?: string;
+    button_reply?: {
+      id: string;
+      title?: string;
+    };
+    list_reply?: {
+      id: string;
+      title?: string;
+    };
+  };
+  image?: {
+    id?: string;
+    link?: string;
+    caption?: string;
+  };
+  document?: {
+    id?: string;
+    link?: string;
+    filename?: string;
+    caption?: string;
+  };
+  audio?: {
+    id?: string;
+    link?: string;
+  };
+  video?: {
+    id?: string;
+    link?: string;
+    caption?: string;
+  };
+  sticker?: {
+    id?: string;
+    link?: string;
+  };
+  context?: {
+    id?: string;
+    from?: string;
+  };
+  [key: string]: any;
+}
+
 @Injectable()
 export class WebhookService {
   private readonly logger = new Logger(WebhookService.name);
@@ -79,6 +129,219 @@ export class WebhookService {
       `📨 Webhook de campanha recebido (campaign=${message.campaignId}, message=${message.id}, status=${whatsappStatus})`,
     );
     await this.updateMessageStatus(message, whatsappStatus, status, webhookEvent.id);
+  }
+
+  private async updateMessageStatus(
+    message: any,
+    metaStatus: string,
+    statusPayload: MetaStatusUpdate,
+    webhookEventId: string,
+  ) {
+    const newStatus = this.mapMetaStatusToMessageStatus(metaStatus);
+    const previousStatus = message.status as MessageStatus | undefined;
+    const eventTimestamp = this.resolveMessageTimestamp(statusPayload?.timestamp);
+
+    const messageUpdate: any = {
+      status: newStatus,
+      metadata: {
+        ...(message.metadata as Record<string, unknown>),
+        lastWebhookStatus: metaStatus,
+        lastWebhookEventId: webhookEventId,
+        lastWebhookAt: eventTimestamp,
+        lastWebhookErrors: statusPayload.errors ?? [],
+      },
+    };
+
+    if (newStatus === 'DELIVERED') {
+      messageUpdate.deliveredAt = eventTimestamp;
+    }
+
+    if (newStatus === 'READ') {
+      messageUpdate.readAt = eventTimestamp;
+    }
+
+    if (newStatus === 'FAILED') {
+      messageUpdate.failedAt = eventTimestamp;
+
+      if (statusPayload.errors?.length) {
+        const [firstError] = statusPayload.errors;
+        messageUpdate.errorCode = String(firstError.code ?? '');
+        messageUpdate.errorMessage = firstError.message ?? firstError.title ?? null;
+        messageUpdate.errorDetails = statusPayload.errors as any;
+      }
+    }
+
+    await this.prisma.message.update({
+      where: { id: message.id },
+      data: messageUpdate,
+    });
+
+    if (message.recipientId) {
+      const recipientUpdate: any = { status: newStatus };
+
+      if (newStatus === 'DELIVERED') {
+        recipientUpdate.deliveredAt = eventTimestamp;
+      }
+
+      if (newStatus === 'READ') {
+        recipientUpdate.readAt = eventTimestamp;
+      }
+
+      if (newStatus === 'FAILED') {
+        recipientUpdate.isActive = false;
+      }
+
+      await this.prisma.campaignRecipient.update({
+        where: { id: message.recipientId },
+        data: recipientUpdate,
+      });
+    }
+
+    await this.updateCampaignCounters(message.campaignId, newStatus, previousStatus);
+
+    try {
+      await this.prisma.webhookEvent.update({
+        where: { id: webhookEventId },
+        data: {
+          messageId: message.id,
+          processed: true,
+          processedAt: new Date(),
+        },
+      });
+    } catch (error) {
+      this.logger.debug(
+        `Não foi possível vincular webhookEvent ${webhookEventId} à mensagem ${message.id}: ${String(error)}`,
+      );
+    }
+
+    this.logger.debug(
+      `Status da mensagem ${message.id}: ${previousStatus ?? 'unknown'} → ${newStatus} (meta=${metaStatus})`,
+    );
+  }
+
+  /**
+   * Processa mensagens recebidas pelo Meta (respostas de destinatários)
+   */
+  async processMetaMessage(message: MetaIncomingMessage, metadata: MetaMetadata) {
+    if (!message?.id) {
+      this.logger.warn('Mensagem recebida sem ID - ignorando');
+      return;
+    }
+
+    const whatsappMessageId = message.id;
+    const fromPhoneRaw = message.from ?? '';
+    const normalizedFrom = this.normalizePhoneNumber(fromPhoneRaw);
+    const campaignResponseRepo = (this.prisma as any).campaignResponse;
+
+    if (!normalizedFrom) {
+      this.logger.warn(`Mensagem ${whatsappMessageId} sem número de origem - ignorando`);
+      return;
+    }
+
+    if (!campaignResponseRepo) {
+      this.logger.error('Repositório campaignResponse não disponível no PrismaService');
+      return;
+    }
+
+    const existingResponse = await campaignResponseRepo.findUnique({
+      where: { whatsappMessageId },
+    });
+
+    if (existingResponse) {
+      this.logger.debug(`Resposta ${whatsappMessageId} já processada anteriormente`);
+      return;
+    }
+
+    const receivedAt = this.resolveMessageTimestamp(message.timestamp);
+
+    // Tenta identificar mensagem original usando contexto (ID do template enviado)
+    let relatedMessage: any = null;
+    if (message.context?.id) {
+      relatedMessage = await this.prisma.message.findFirst({
+        where: {
+          OR: [{ whatsappMessageId: message.context.id }, { externalId: message.context.id }],
+        },
+        include: {
+          campaign: true,
+          recipient: true,
+        },
+      });
+    }
+
+    if (!relatedMessage) {
+      relatedMessage = await this.findMessageByPhone(normalizedFrom);
+    }
+
+    let recipientRecord: any = relatedMessage?.recipient;
+    if (!recipientRecord) {
+      recipientRecord = await this.findRecipientByPhone(normalizedFrom);
+    }
+
+    const campaignId = relatedMessage?.campaignId ?? recipientRecord?.campaignId;
+
+    if (!campaignId) {
+      this.logger.warn(
+        `Resposta recebida sem campanha associada: ${whatsappMessageId} (from=${normalizedFrom})`,
+      );
+      return;
+    }
+
+    const responseType = this.resolveResponseType(message);
+    const textBody = this.extractResponseText(message);
+    const mediaUrl = this.extractMediaUrl(message);
+    const optOutMatch = this.detectOptOut({ message, textBody });
+
+    const messageSentAt =
+      relatedMessage?.sentAt ??
+      relatedMessage?.queuedAt ??
+      relatedMessage?.createdAt ??
+      recipientRecord?.sentAt ??
+      recipientRecord?.createdAt ??
+      null;
+
+    const responseTimeSeconds = this.calculateResponseTimeSeconds(messageSentAt, receivedAt);
+
+    await campaignResponseRepo.create({
+      data: {
+        campaignId,
+        recipientId: recipientRecord?.id ?? null,
+        messageId: relatedMessage?.id ?? null,
+        whatsappMessageId,
+        fromPhone: normalizedFrom,
+        responseType,
+        textBody,
+        mediaUrl,
+        metadata: {
+          displayPhoneNumber: metadata.display_phone_number,
+          phoneNumberId: metadata.phone_number_id,
+          optOutDetected: Boolean(optOutMatch),
+          ...(optOutMatch ? { optOutReason: optOutMatch.reason } : {}),
+        } as any,
+        responsePayload: message as any,
+        receivedAt,
+        responseTimeSeconds,
+      },
+    });
+
+    await this.updateResponseCounters({
+      campaignId,
+      recipient: recipientRecord,
+      responseTimestamp: receivedAt,
+      responseTimeSeconds,
+    });
+
+    if (optOutMatch && recipientRecord?.id) {
+      await this.handleOptOut({
+        campaignId,
+        recipient: recipientRecord,
+        timestamp: receivedAt,
+        reason: optOutMatch.reason,
+      });
+    }
+
+    this.logger.log(
+      `💬 Resposta registrada (campaign=${campaignId}, recipient=${recipientRecord?.id ?? 'n/a'}, message=${whatsappMessageId})`,
+    );
   }
 
   /**
@@ -163,109 +426,6 @@ export class WebhookService {
 
   /**
    * Atualiza o status da mensagem com base no webhook do Meta
-   */
-  private async updateMessageStatus(
-    message: any,
-    whatsappStatus: string,
-    statusData: MetaStatusUpdate,
-    webhookEventId: string,
-  ) {
-    const newStatus = this.mapMetaStatusToMessageStatus(whatsappStatus);
-    const now = new Date();
-
-    // Log apenas em debug
-    this.logger.debug(`Atualiza ${message.id}: ${message.status} → ${newStatus}`);
-
-    // Dados de erro (se houver)
-    let errorData: any = null;
-    if (statusData.errors && statusData.errors.length > 0) {
-      errorData = {
-        errorCode: statusData.errors[0].code.toString(),
-        errorMessage: statusData.errors[0].title,
-        errorDetails: statusData.errors,
-      };
-    }
-
-    const previousStatus = message.status as MessageStatus | undefined;
-
-    // Atualiza a mensagem
-    await this.prisma.message.update({
-      where: { id: message.id },
-      data: {
-        status: newStatus,
-        whatsappMessageId: statusData.id,
-        ...(newStatus === 'SENT' && { sentAt: now }),
-        ...(newStatus === 'DELIVERED' && { deliveredAt: now }),
-        ...(newStatus === 'READ' && { readAt: now }),
-        ...(newStatus === 'FAILED' && {
-          failedAt: now,
-          ...errorData,
-        }),
-        metadata: {
-          ...message.metadata,
-          lastWebhookStatus: whatsappStatus,
-          lastWebhookAt: now.toISOString(),
-          recipientId: statusData.recipient_id,
-        },
-      },
-    });
-
-    // Atualiza o destinatário
-    await this.prisma.campaignRecipient.update({
-      where: { id: message.recipientId },
-      data: {
-        status: newStatus,
-        ...(newStatus === 'SENT' && { sentAt: now }),
-        ...(newStatus === 'DELIVERED' && { deliveredAt: now }),
-        ...(newStatus === 'READ' && { readAt: now }),
-      },
-    });
-
-    // Atualiza contadores da campanha
-    await this.updateCampaignCounters(message.campaignId, newStatus, previousStatus);
-
-    // Marca o webhook como processado
-    await this.prisma.webhookEvent.update({
-      where: { id: webhookEventId },
-      data: {
-        processed: true,
-        processedAt: now,
-        messageId: message.id,
-      },
-    });
-
-    // Log apenas em debug
-    this.logger.debug(`✅ ${message.id} → ${newStatus}`);
-  }
-
-  /**
-   * Busca mensagem pelo telefone do destinatário (mais recente)
-   */
-  private async findMessageByPhone(phone: string) {
-    // Remove o código do país se houver
-    const cleanPhone = phone.replace(/^55/, '');
-
-    return this.prisma.message.findFirst({
-      where: {
-        phoneNumber: {
-          contains: cleanPhone,
-        },
-        status: {
-          in: ['PENDING', 'QUEUED', 'SENT'],
-        },
-      },
-      include: {
-        campaign: true,
-        recipient: true,
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    });
-  }
-
-  /**
-   * Mapeia status do Meta para MessageStatus do Prisma
    */
   private mapMetaStatusToMessageStatus(metaStatus: string): MessageStatus {
     const statusMap: Record<string, MessageStatus> = {
@@ -368,5 +528,402 @@ export class WebhookService {
       // Log apenas em debug
       this.logger.debug(`Contadores ${campaignId}: ${previousStatus} → ${newStatus}`);
     }
+  }
+
+  private normalizePhoneNumber(phone?: string): string {
+    if (!phone) {
+      return '';
+    }
+    return phone.replace(/\D/g, '');
+  }
+
+  private resolveMessageTimestamp(rawTimestamp?: string): Date {
+    if (!rawTimestamp) {
+      return new Date();
+    }
+
+    const numeric = Number(rawTimestamp);
+
+    if (!Number.isFinite(numeric)) {
+      return new Date();
+    }
+
+    if (numeric > 1_000_000_000_000) {
+      return new Date(numeric);
+    }
+
+    return new Date(numeric * 1000);
+  }
+
+  private resolveResponseType(message: MetaIncomingMessage): string {
+    if (message.type === 'interactive' && message.interactive?.type) {
+      return `interactive:${message.interactive.type}`;
+    }
+
+    return message.type || 'unknown';
+  }
+
+  private extractResponseText(message: MetaIncomingMessage): string | null {
+    if (message.type === 'text' && message.text?.body) {
+      return message.text.body;
+    }
+
+    if (message.type === 'interactive') {
+      const buttonTitle = message.interactive?.button_reply?.title;
+      const listTitle = message.interactive?.list_reply?.title;
+      return buttonTitle ?? listTitle ?? null;
+    }
+
+    if (message.image?.caption) {
+      return message.image.caption;
+    }
+
+    if (message.video?.caption) {
+      return message.video.caption;
+    }
+
+    if (message.document?.filename) {
+      return message.document.filename;
+    }
+
+    return null;
+  }
+
+  private extractMediaUrl(message: MetaIncomingMessage): string | null {
+    if (message.type === 'image' && message.image?.link) {
+      return message.image.link;
+    }
+
+    if (message.type === 'video' && message.video?.link) {
+      return message.video.link;
+    }
+
+    if (message.type === 'audio' && message.audio?.link) {
+      return message.audio.link;
+    }
+
+    if (message.type === 'document' && message.document?.link) {
+      return message.document.link;
+    }
+
+    if (message.sticker?.link) {
+      return message.sticker.link;
+    }
+
+    return null;
+  }
+
+  private async findMessageByPhone(phone: string) {
+    const normalized = this.normalizePhoneNumber(phone);
+    if (!normalized) {
+      return null;
+    }
+
+    const variants = new Set<string>([normalized]);
+
+    if (normalized.startsWith('55')) {
+      variants.add(normalized.slice(2));
+    }
+
+    return this.prisma.message.findFirst({
+      where: {
+        OR: Array.from(variants).map((value) => ({
+          phoneNumber: {
+            endsWith: value,
+          },
+        })),
+      },
+      include: {
+        campaign: true,
+        recipient: true,
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+  }
+
+  private async findRecipientByPhone(phone: string) {
+    const normalized = this.normalizePhoneNumber(phone);
+    if (!normalized) {
+      return null;
+    }
+
+    const variants = new Set<string>([normalized]);
+
+    if (normalized.startsWith('55')) {
+      variants.add(normalized.slice(2));
+    }
+
+    return this.prisma.campaignRecipient.findFirst({
+      where: {
+        isActive: true,
+        OR: Array.from(variants).map((value) => ({
+          phoneNumber: {
+            endsWith: value,
+          },
+        })),
+      },
+      include: {
+        campaign: true,
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+  }
+
+  private async updateResponseCounters(params: {
+    campaignId: string;
+    recipient?: any;
+    responseTimestamp: Date;
+    responseTimeSeconds?: number | null;
+  }) {
+    const { campaignId, recipient, responseTimestamp, responseTimeSeconds } = params;
+
+    const campaignUpdate: any = {
+      responsesCount: { increment: 1 },
+      lastResponseAt: responseTimestamp,
+    };
+
+    const isFirstResponse = Boolean(recipient?.id) && !recipient.respondedAt;
+    const hasResponseTime = this.isFiniteNumber(responseTimeSeconds);
+
+    if (isFirstResponse && hasResponseTime) {
+      campaignUpdate.responseTimeTotalSeconds = { increment: responseTimeSeconds };
+    }
+
+    if (recipient?.id) {
+      const recipientUpdate: any = {
+        responseCount: { increment: 1 },
+        lastResponseAt: responseTimestamp,
+      };
+
+      if (isFirstResponse) {
+        recipientUpdate.respondedAt = responseTimestamp;
+        campaignUpdate.respondedCount = { increment: 1 };
+
+        if (hasResponseTime) {
+          recipientUpdate.firstResponseTimeSeconds = responseTimeSeconds;
+        }
+
+        recipient.respondedAt = responseTimestamp;
+        if (hasResponseTime) {
+          recipient.firstResponseTimeSeconds = responseTimeSeconds;
+        }
+      }
+
+      await this.prisma.campaignRecipient.update({
+        where: { id: recipient.id },
+        data: recipientUpdate,
+      });
+    }
+
+    await this.prisma.campaign.update({
+      where: { id: campaignId },
+      data: campaignUpdate,
+    });
+  }
+
+  private calculateResponseTimeSeconds(
+    sentAt: Date | null | undefined,
+    responseAt: Date,
+  ): number | null {
+    if (!sentAt) {
+      return null;
+    }
+
+    const diffSeconds = (responseAt.getTime() - sentAt.getTime()) / 1000;
+
+    if (!Number.isFinite(diffSeconds) || diffSeconds < 0) {
+      return null;
+    }
+
+    return Number(diffSeconds.toFixed(3));
+  }
+
+  private isFiniteNumber(value: unknown): value is number {
+    return typeof value === 'number' && Number.isFinite(value);
+  }
+
+  private detectOptOut(input: {
+    message: MetaIncomingMessage;
+    textBody: string | null;
+  }): { reason: string } | null {
+    const { message, textBody } = input;
+    const candidates = new Set<string>();
+
+    if (textBody) {
+      candidates.add(textBody);
+    }
+
+    if (message.text?.body) {
+      candidates.add(message.text.body);
+    }
+
+    const interactive = message.interactive;
+    if (interactive?.button_reply?.title) {
+      candidates.add(interactive.button_reply.title);
+    }
+
+    if (interactive?.button_reply?.id) {
+      candidates.add(interactive.button_reply.id);
+    }
+
+    if (interactive?.list_reply?.title) {
+      candidates.add(interactive.list_reply.title);
+    }
+
+    if (interactive?.list_reply?.id) {
+      candidates.add(interactive.list_reply.id);
+    }
+
+    const buttonPayload = (message as any)?.button?.payload;
+    if (typeof buttonPayload === 'string') {
+      candidates.add(buttonPayload);
+    }
+
+    const buttonText = (message as any)?.button?.text;
+    if (typeof buttonText === 'string') {
+      candidates.add(buttonText);
+    }
+
+    for (const candidate of candidates) {
+      const normalized = this.normalizeOptOutCandidate(candidate);
+      if (!normalized) {
+        continue;
+      }
+
+      const keyword = this.findOptOutKeyword(normalized);
+      if (keyword) {
+        return { reason: keyword };
+      }
+    }
+
+    return null;
+  }
+
+  private normalizeOptOutCandidate(value: unknown): string {
+    if (typeof value !== 'string') {
+      return '';
+    }
+
+    return value
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase()
+      .replace(/[^A-Z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  private findOptOutKeyword(normalizedCandidate: string): string | null {
+    if (!normalizedCandidate) {
+      return null;
+    }
+
+    const directMatches = [
+      'STOP',
+      'CANCEL',
+      'CANCELA',
+      'CANCELAR',
+      'CANCELAMENTO',
+      'DESCADASTRAR',
+      'DESCADASTRO',
+      'REMOVER',
+      'REMOVA',
+      'PARAR',
+      'PARE',
+      'SAIR',
+      'SAIR DA LISTA',
+      'OPT OUT',
+      'UNSUBSCRIBE',
+      'UNSUB',
+      'QUIT',
+    ];
+
+    for (const keyword of directMatches) {
+      if (normalizedCandidate === keyword) {
+        return keyword;
+      }
+
+      if (normalizedCandidate.startsWith(`${keyword} `)) {
+        return keyword;
+      }
+
+      if (normalizedCandidate.endsWith(` ${keyword}`)) {
+        return keyword;
+      }
+
+      if (normalizedCandidate.includes(` ${keyword} `)) {
+        return keyword;
+      }
+    }
+
+    const containsKeywords = [
+      'PARAR DE RECEBER',
+      'NAO QUERO RECEBER',
+      'NAO QUERO MENSAGENS',
+      'NAO ENVIAR',
+      'REMOVER DA LISTA',
+      'NAO ME MANDAR',
+      'NAO RECEBER MAIS',
+    ];
+
+    for (const keyword of containsKeywords) {
+      if (normalizedCandidate.includes(keyword)) {
+        return keyword;
+      }
+    }
+
+    const compact = normalizedCandidate.replace(/\s+/g, '');
+    if (compact === 'OPTOUT') {
+      return 'OPT_OUT';
+    }
+
+    return null;
+  }
+
+  private async handleOptOut(params: {
+    campaignId: string;
+    recipient: any;
+    timestamp: Date;
+    reason: string;
+  }) {
+    const { campaignId, recipient, timestamp, reason } = params;
+
+    if (!recipient?.id) {
+      return;
+    }
+
+    if (recipient.optedOut) {
+      return;
+    }
+
+    await this.prisma.campaignRecipient.update({
+      where: { id: recipient.id },
+      data: {
+        optedOut: true,
+        optedOutAt: timestamp,
+        optOutReason: reason,
+        isActive: false,
+      },
+    });
+
+    await this.prisma.campaign.update({
+      where: { id: campaignId },
+      data: {
+        optOutCount: { increment: 1 },
+      },
+    });
+
+    recipient.optedOut = true;
+    recipient.optedOutAt = timestamp;
+    recipient.optOutReason = reason;
+    recipient.isActive = false;
+
+    this.logger.log(
+      `🚫 Opt-out detectado (campaign=${campaignId}, recipient=${recipient.id}, reason=${reason})`,
+    );
   }
 }

@@ -190,6 +190,11 @@ model Campaign {
   deliveredCount    Int           @default(0)
   readCount         Int           @default(0)
   failedCount       Int           @default(0)
+  responsesCount    Int           @default(0)
+  respondedCount    Int           @default(0)
+  responseTimeTotalSeconds Float   @default(0)
+  optOutCount       Int           @default(0)
+  lastResponseAt    DateTime?
   
   // Metadados
   tags            String[]
@@ -200,6 +205,8 @@ model Campaign {
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
   
+  responses       CampaignResponse[]
+
   @@index([status])
   @@index([scheduledAt])
   @@index([createdAt])
@@ -222,6 +229,13 @@ model CampaignRecipient {
   sentAt          DateTime?     // Quando foi enviado
   deliveredAt     DateTime?     // Quando foi entregue
   readAt          DateTime?     // Quando foi lido
+  respondedAt     DateTime?     // Quando respondeu pela primeira vez
+  lastResponseAt  DateTime?     // Última resposta registrada
+  responseCount     Int           @default(0)
+  firstResponseTimeSeconds Float?
+  optedOut        Boolean       @default(false)
+  optedOutAt      DateTime?
+  optOutReason    String?
   
   // Variáveis personalizadas para este destinatário
   // Exemplo: {"1": "João", "2": "Premium", "3": "50"}
@@ -237,6 +251,7 @@ model CampaignRecipient {
   
   // Mensagens enviadas para este destinatário
   messages        Message[]
+  responses       CampaignResponse[]
   
   @@unique([campaignId, phoneNumber])
   @@index([campaignId])
@@ -286,6 +301,7 @@ model Message {
   
   // Webhooks recebidos
   webhookEvents     WebhookEvent[]
+  responses         CampaignResponse[]
   
   // Metadados
   metadata          Json?
@@ -332,4 +348,34 @@ model WebhookEvent {
   @@index([eventType])
   @@index([timestamp])
   @@map("webhook_events")
+}
+
+// Respostas de destinatários
+model CampaignResponse {
+  id              String             @id @default(uuid())
+  campaignId      String
+  campaign        Campaign           @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  recipientId     String?
+  recipient       CampaignRecipient? @relation(fields: [recipientId], references: [id], onDelete: SetNull)
+
+  messageId       String?
+  message         Message?           @relation(fields: [messageId], references: [id], onDelete: SetNull)
+
+  whatsappMessageId String?          @unique
+  fromPhone       String
+  responseType    String?
+  textBody        String?
+  mediaUrl        String?
+  metadata        Json?
+
+  responsePayload Json?
+  receivedAt      DateTime           @default(now())
+  createdAt       DateTime           @default(now())
+  responseTimeSeconds Float?
+
+  @@index([campaignId])
+  @@index([recipientId])
+  @@index([messageId])
+  @@map("campaign_responses")
 }

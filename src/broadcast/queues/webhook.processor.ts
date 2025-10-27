@@ -38,6 +38,21 @@ export interface MetaWebhookJob {
   };
 }
 
+export interface MetaMessageWebhookJob {
+  type: 'meta-message';
+  message: {
+    id: string;
+    from?: string;
+    timestamp?: string;
+    type: string;
+    [key: string]: any;
+  };
+  metadata: {
+    display_phone_number: string;
+    phone_number_id: string;
+  };
+}
+
 export interface DiogenesWebhookJob {
   type: 'diogenes';
   payload: {
@@ -61,7 +76,7 @@ export interface DiogenesWebhookJob {
   };
 }
 
-export type WebhookJob = MetaWebhookJob | DiogenesWebhookJob;
+export type WebhookJob = MetaWebhookJob | MetaMessageWebhookJob | DiogenesWebhookJob;
 
 @Processor('webhook-queue', {
   concurrency: 5, // Processa até 5 webhooks simultaneamente
@@ -108,6 +123,28 @@ export class WebhookProcessor extends WorkerHost {
           type: 'meta',
           messageId: jobData.status.id,
           status: jobData.status.status,
+        };
+      } else if (jobData.type === 'meta-message') {
+        this.fileLogger.logWebhook({
+          timestamp: new Date().toISOString(),
+          type: 'meta-message',
+          messageId: jobData.message.id,
+          status: jobData.message.type,
+          recipient: jobData.message.from || 'unknown',
+          metadata: jobData.metadata,
+          payload: jobData.message,
+        });
+
+        await this.webhookService.processMetaMessage(jobData.message, jobData.metadata);
+
+        this.logger.debug(
+          `✅ Mensagem Meta processada - ${jobData.message.id} (${jobData.message.from ?? 'unknown'})`,
+        );
+
+        return {
+          success: true,
+          type: 'meta-message',
+          messageId: jobData.message.id,
         };
       } else if (jobData.type === 'diogenes') {
         // Log em arquivo ao invés do terminal

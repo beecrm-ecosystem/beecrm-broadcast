@@ -4,6 +4,7 @@ import { ValidationPipe, Logger } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { join } from 'path';
 import { AllExceptionsFilter } from './broadcast/filters/http-exception.filter';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 async function bootstrap() {
   // Define nível de log baseado no ambiente
@@ -46,11 +47,29 @@ async function bootstrap() {
   // Serve static files a partir da pasta raiz "static"
   app.useStaticAssets(join(process.cwd(), 'static'));
 
+  const swaggerConfig = new DocumentBuilder()
+    .setTitle('BeeCRM Broadcast API')
+    .setDescription('Documentação das rotas de broadcast e webhooks')
+    .setVersion('1.0')
+    .addTag('Broadcast')
+    .addTag('Webhooks')
+    .build();
+
+  const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
+  const swaggerPath = 'api/docs';
+  SwaggerModule.setup(swaggerPath, app, swaggerDocument, {
+    swaggerOptions: {
+      persistAuthorization: true,
+    },
+    customSiteTitle: 'BeeCRM Broadcast - API Docs',
+  });
+
   const port = process.env.PORT ?? 3000;
   await app.listen(port);
 
   console.log(`🚀 Aplicação rodando em: http://localhost:${port}`);
   console.log(`📡 API Broadcast: http://localhost:${port}/api/broadcast`);
+  console.log(`📘 Swagger UI: http://localhost:${port}/${swaggerPath}`);
   console.log(`🎨 Painel Web: http://localhost:${port}/index.html`);
 }
 

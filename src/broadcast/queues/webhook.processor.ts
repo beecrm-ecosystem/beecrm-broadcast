@@ -113,11 +113,6 @@ export class WebhookProcessor extends WorkerHost {
 
         await this.webhookService.processMetaWebhook(jobData.status, jobData.metadata);
 
-        // Apenas log de sucesso resumido no terminal
-        this.logger.debug(
-          `✅ Webhook processado - ${jobData.status.status} - ${jobData.status.recipient_id}`,
-        );
-
         return {
           success: true,
           type: 'meta',

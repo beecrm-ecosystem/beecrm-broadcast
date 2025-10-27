@@ -96,7 +96,6 @@ export class WebhookService {
     });
 
     if (!message) {
-      this.logger.debug(`Mensagem não encontrada: ${messageId} - ${recipientPhone}`);
       // Tenta buscar pelo telefone do destinatário (fallback)
       const messageByPhone = await this.findMessageByPhone(recipientPhone);
       if (messageByPhone) {
@@ -118,8 +117,6 @@ export class WebhookService {
           `📨 Webhook de campanha recebido (campaign=${messageByPhone.campaignId}, message=${messageByPhone.id}, status=${whatsappStatus})`,
         );
         await this.updateMessageStatus(messageByPhone, whatsappStatus, status, webhookEvent.id);
-      } else {
-        this.logger.debug(`Webhook ignorado - mensagem não encontrada: ${messageId}`);
       }
       return;
     }
@@ -137,9 +134,6 @@ export class WebhookService {
         processed: false,
       },
     });
-
-    // Log apenas em debug
-    this.logger.debug(`Webhook salvo: ${webhookEvent.id} - ${whatsappStatus}`);
 
     this.logger.log(
       `📨 Webhook de campanha recebido (campaign=${message.campaignId}, message=${message.id}, status=${whatsappStatus})`,
@@ -377,7 +371,6 @@ export class WebhookService {
     });
 
     if (!message) {
-      this.logger.debug(`Webhook ignorado - mensagem não encontrada (externalId: ${externalId})`);
       return;
     }
 

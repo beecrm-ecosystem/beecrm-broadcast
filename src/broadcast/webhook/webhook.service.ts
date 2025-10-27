@@ -84,23 +84,6 @@ export class WebhookService {
     const whatsappStatus = status.status;
     const recipientPhone = status.recipient_id;
 
-    // Salva o evento do webhook
-    const webhookEvent = await this.prisma.webhookEvent.create({
-      data: {
-        provider: 'meta',
-        event: 'message_status',
-        eventType: `status.${whatsappStatus}`,
-        whatsappMessageId: messageId,
-        status: whatsappStatus,
-        timestamp: new Date(parseInt(status.timestamp) * 1000),
-        payload: { status, metadata } as any,
-        processed: false,
-      },
-    });
-
-    // Log apenas em debug
-    this.logger.debug(`Webhook salvo: ${webhookEvent.id} - ${whatsappStatus}`);
-
     // Busca a mensagem pelo whatsappMessageId
     const message = await this.prisma.message.findFirst({
       where: {
@@ -117,13 +100,46 @@ export class WebhookService {
       // Tenta buscar pelo telefone do destinatário (fallback)
       const messageByPhone = await this.findMessageByPhone(recipientPhone);
       if (messageByPhone) {
+        // Salva o evento do webhook apenas quando a mensagem é encontrada
+        const webhookEvent = await this.prisma.webhookEvent.create({
+          data: {
+            provider: 'meta',
+            event: 'message_status',
+            eventType: `status.${whatsappStatus}`,
+            whatsappMessageId: messageId,
+            status: whatsappStatus,
+            timestamp: new Date(parseInt(status.timestamp) * 1000),
+            payload: { status, metadata } as any,
+            processed: false,
+          },
+        });
+
         this.logger.log(
           `📨 Webhook de campanha recebido (campaign=${messageByPhone.campaignId}, message=${messageByPhone.id}, status=${whatsappStatus})`,
         );
         await this.updateMessageStatus(messageByPhone, whatsappStatus, status, webhookEvent.id);
+      } else {
+        this.logger.debug(`Webhook ignorado - mensagem não encontrada: ${messageId}`);
       }
       return;
     }
+
+    // Salva o evento do webhook apenas quando a mensagem é encontrada
+    const webhookEvent = await this.prisma.webhookEvent.create({
+      data: {
+        provider: 'meta',
+        event: 'message_status',
+        eventType: `status.${whatsappStatus}`,
+        whatsappMessageId: messageId,
+        status: whatsappStatus,
+        timestamp: new Date(parseInt(status.timestamp) * 1000),
+        payload: { status, metadata } as any,
+        processed: false,
+      },
+    });
+
+    // Log apenas em debug
+    this.logger.debug(`Webhook salvo: ${webhookEvent.id} - ${whatsappStatus}`);
 
     this.logger.log(
       `📨 Webhook de campanha recebido (campaign=${message.campaignId}, message=${message.id}, status=${whatsappStatus})`,
@@ -351,15 +367,6 @@ export class WebhookService {
     const { event, data } = payload;
     const externalId = data.key.id;
 
-    // Salva o evento do webhook
-    await this.prisma.webhookEvent.create({
-      data: {
-        provider: 'diogenes',
-        event,
-        payload: payload as any,
-      },
-    });
-
     // Busca a mensagem pelo externalId
     const message = await this.prisma.message.findFirst({
       where: { externalId },
@@ -370,9 +377,20 @@ export class WebhookService {
     });
 
     if (!message) {
-      this.logger.warn(`Mensagem não encontrada para externalId: ${externalId}`);
+      this.logger.debug(`Webhook ignorado - mensagem não encontrada (externalId: ${externalId})`);
       return;
     }
+
+    // Salva o evento do webhook apenas quando a mensagem é encontrada
+    await this.prisma.webhookEvent.create({
+      data: {
+        provider: 'diogenes',
+        event,
+        payload: payload as any,
+        messageId: message.id,
+        processed: false,
+      },
+    });
 
     // Mapeia o evento para o status
     const statusMap: Record<string, MessageStatus> = {

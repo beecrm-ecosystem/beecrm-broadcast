@@ -150,6 +150,8 @@ export class CampaignWebhookService {
       payload.data.details.failedMessages = options.failedMessages;
     }
 
+    this.logger.log(`Payload do webhook: ${JSON.stringify(payload, null, 2)}`);
+
     this.logger.log(
       `📤 Enviando webhook broadcast:statusUpdate (campaign=${campaign.id}, status=${resolvedStatus}, code=${mappedStatus})`,
     );

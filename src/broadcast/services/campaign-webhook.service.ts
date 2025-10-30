@@ -23,6 +23,14 @@ interface BroadcastSummaryOptions {
   failedMessages?: BroadcastMessageSummary[];
 }
 
+interface BroadcastSummarySnapshot {
+  totalContacts: number;
+  sentContacts: number;
+  deliveredContacts: number;
+  readContacts: number;
+  failedContacts: number;
+}
+
 export interface BroadcastMessageSummary {
   recipientId: string;
   phoneNumber: string;
@@ -42,6 +50,8 @@ export interface BroadcastMessageSummary {
 export class CampaignWebhookService {
   private readonly logger = new Logger(CampaignWebhookService.name);
   private readonly endpointPath = '/api/v1/webhooks/campaign-webhook';
+  // Cache highest counters per broadcast so follow-up webhooks never regress delivered/read totals.
+  private readonly summaryHistory = new Map<string, BroadcastSummarySnapshot>();
 
   constructor(private readonly httpService: HttpService) {}
 
@@ -110,20 +120,33 @@ export class CampaignWebhookService {
     const failedContacts = Math.min(Math.max(failedContactsRaw, 0), totalContacts);
     const deliveredContacts = Math.min(Math.max(deliveredContactsRaw, 0), sentContacts);
     const readContacts = Math.min(Math.max(readContactsRaw, 0), deliveredContacts);
-    const pendingContacts =
-      options.pendingContacts ?? Math.max(totalContacts - sentContacts - failedContacts, 0);
+
+    const broadcastId = this.resolveBroadcastId(campaign);
+    const normalizedCounters = this.applySummaryHistory(broadcastId, {
+      totalContacts,
+      sentContacts,
+      deliveredContacts,
+      readContacts,
+      failedContacts,
+    });
+    const pendingContacts = Math.max(
+      normalizedCounters.totalContacts -
+        normalizedCounters.sentContacts -
+        normalizedCounters.failedContacts,
+      0,
+    );
 
     const payload: any = {
       event: 'broadcast:statusUpdate',
       data: {
-        broadcastId: this.resolveBroadcastId(campaign),
+        broadcastId,
         details: {
           status: mappedStatus,
-          totalContacts,
-          sentContacts,
-          deliveredContacts,
-          readContacts,
-          failedContacts,
+          totalContacts: normalizedCounters.totalContacts,
+          sentContacts: normalizedCounters.sentContacts,
+          deliveredContacts: normalizedCounters.deliveredContacts,
+          readContacts: normalizedCounters.readContacts,
+          failedContacts: normalizedCounters.failedContacts,
           pendingContacts,
         },
       },
@@ -156,7 +179,7 @@ export class CampaignWebhookService {
       `📤 Enviando webhook broadcast:statusUpdate (campaign=${campaign.id}, status=${resolvedStatus}, code=${mappedStatus})`,
     );
     this.logger.log(
-      `   📊 Contadores: sent=${sentContacts}, delivered=${deliveredContacts}, read=${readContacts}, failed=${failedContacts}, pending=${pendingContacts}, total=${totalContacts}`,
+      `   📊 Contadores: sent=${normalizedCounters.sentContacts}, delivered=${normalizedCounters.deliveredContacts}, read=${normalizedCounters.readContacts}, failed=${normalizedCounters.failedContacts}, pending=${pendingContacts}, total=${normalizedCounters.totalContacts}`,
     );
     if (payload.data.details.completed) {
       this.logger.log(
@@ -249,5 +272,38 @@ export class CampaignWebhookService {
     };
 
     return map[status];
+  }
+
+  private applySummaryHistory(
+    broadcastId: string,
+    counters: BroadcastSummarySnapshot,
+  ): BroadcastSummarySnapshot {
+    const previous = this.summaryHistory.get(broadcastId);
+    const merged: BroadcastSummarySnapshot = {
+      totalContacts: counters.totalContacts,
+      sentContacts: counters.sentContacts,
+      deliveredContacts: counters.deliveredContacts,
+      readContacts: counters.readContacts,
+      failedContacts: counters.failedContacts,
+    };
+
+    if (previous) {
+      merged.totalContacts = Math.max(previous.totalContacts, merged.totalContacts);
+      merged.sentContacts = Math.max(previous.sentContacts, merged.sentContacts);
+      merged.deliveredContacts = Math.max(previous.deliveredContacts, merged.deliveredContacts);
+      merged.readContacts = Math.max(previous.readContacts, merged.readContacts);
+      merged.failedContacts = Math.max(previous.failedContacts, merged.failedContacts);
+    }
+
+    merged.totalContacts = Math.max(merged.totalContacts, 0);
+    merged.sentContacts = Math.min(Math.max(merged.sentContacts, 0), merged.totalContacts);
+    merged.failedContacts = Math.min(Math.max(merged.failedContacts, 0), merged.totalContacts);
+    merged.deliveredContacts = Math.min(merged.deliveredContacts, merged.sentContacts);
+    merged.deliveredContacts = Math.max(merged.deliveredContacts, 0);
+    merged.readContacts = Math.min(merged.readContacts, merged.deliveredContacts);
+    merged.readContacts = Math.max(merged.readContacts, 0);
+
+    this.summaryHistory.set(broadcastId, merged);
+    return merged;
   }
 }

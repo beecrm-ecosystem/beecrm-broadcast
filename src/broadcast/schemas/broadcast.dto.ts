@@ -11,8 +11,18 @@ import {
   Min,
   Max,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Type, Transform } from 'class-transformer';
 import { CampaignStatus } from '@prisma/client';
+
+// Transformer para converter arrays vazios em objetos vazios
+export function TransformArrayToObject() {
+  return Transform(({ value }) => {
+    if (Array.isArray(value) && value.length === 0) {
+      return {};
+    }
+    return value;
+  });
+}
 
 // ==================== CREATE CAMPAIGN ====================
 
@@ -125,6 +135,7 @@ export class RecipientDto {
   @IsOptional()
   email?: string;
 
+  @TransformArrayToObject()
   @IsObject()
   @IsOptional()
   variables?: Record<string, string>;
@@ -154,6 +165,7 @@ export class CreateContactDto {
   @IsOptional()
   email?: string;
 
+  @TransformArrayToObject()
   @IsObject()
   @IsOptional()
   variables?: Record<string, any>;

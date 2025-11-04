@@ -722,7 +722,8 @@ export class BroadcastService {
   }
 
   private sanitizeVariables(variables?: Record<string, any>): Record<string, string> | undefined {
-    if (!variables || typeof variables !== 'object') {
+    // Retorna undefined se não houver variáveis, se não for um objeto, ou se for um array
+    if (!variables || typeof variables !== 'object' || Array.isArray(variables)) {
       return undefined;
     }
 

@@ -10,6 +10,7 @@ import {
   IsEnum,
   Min,
   Max,
+  IsBoolean,
 } from 'class-validator';
 import { Type, Transform } from 'class-transformer';
 import { CampaignStatus } from '@prisma/client';
@@ -211,6 +212,55 @@ export class CampaignFilterDto {
   @Min(1)
   @Max(100)
   limit?: number;
+}
+
+// ==================== MANUAL WEBHOOK TRIGGER ====================
+
+export class TriggerBroadcastUpdateDto {
+  @IsEnum(CampaignStatus)
+  @IsOptional()
+  status?: CampaignStatus;
+
+  @IsBoolean()
+  @IsOptional()
+  sendStatusEvent?: boolean;
+
+  @IsNumber()
+  @IsOptional()
+  @Min(0)
+  totalContacts?: number;
+
+  @IsNumber()
+  @IsOptional()
+  @Min(0)
+  sentContacts?: number;
+
+  @IsNumber()
+  @IsOptional()
+  @Min(0)
+  deliveredContacts?: number;
+
+  @IsNumber()
+  @IsOptional()
+  @Min(0)
+  readContacts?: number;
+
+  @IsNumber()
+  @IsOptional()
+  @Min(0)
+  failedContacts?: number;
+
+  @IsNumber()
+  @IsOptional()
+  statusCode?: number;
+
+  @IsString()
+  @IsOptional()
+  link?: string;
+
+  @IsString()
+  @IsOptional()
+  error?: string;
 }
 
 // ==================== RESPONSE DTOS ====================

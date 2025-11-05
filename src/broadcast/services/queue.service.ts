@@ -1,8 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
+import { MessageStatus } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { SendMessageJob } from '../queues/broadcast.processor';
+
+interface EnqueueCampaignOptions {
+  recipientIds?: string[];
+  allowEmpty?: boolean;
+}
 
 @Injectable()
 export class QueueService {
@@ -16,7 +22,9 @@ export class QueueService {
   /**
    * Enfileira todos os destinatários de uma campanha
    */
-  async enqueueCampaign(campaignId: string) {
+  async enqueueCampaign(campaignId: string, options: EnqueueCampaignOptions = {}) {
+    const { recipientIds, allowEmpty = false } = options;
+
     this.logger.log(`Enfileirando campanha: ${campaignId}`);
 
     // Busca a campanha com dados do template
@@ -28,18 +36,47 @@ export class QueueService {
       throw new Error(`Campanha ${campaignId} não encontrada`);
     }
 
-    // Busca todos os destinatários ativos
+    const recipientWhere: any = {
+      campaignId,
+      isActive: true,
+      status: MessageStatus.PENDING,
+    };
+
+    if (recipientIds?.length) {
+      recipientWhere.id = { in: recipientIds };
+    }
+
+    // Busca todos os destinatários ativos elegíveis
     const recipients = await this.prisma.campaignRecipient.findMany({
-      where: {
-        campaignId,
-        isActive: true,
-        status: 'PENDING',
-      },
+      where: recipientWhere,
     });
 
     if (recipients.length === 0) {
+      if (allowEmpty) {
+        this.logger.log(`Nenhum destinatário pendente encontrado para campanha ${campaign.name}`);
+        return {
+          totalEnqueued: 0,
+          batches: 0,
+          batchSize: campaign.batchSize,
+          delayBetweenBatches: campaign.delayBetweenBatches,
+        };
+      }
+
       throw new Error('Nenhum destinatário pendente encontrado');
     }
+
+    const recipientIdsToQueue = recipients.map((recipient) => recipient.id);
+
+    await this.prisma.campaignRecipient.updateMany({
+      where: {
+        id: {
+          in: recipientIdsToQueue,
+        },
+      },
+      data: {
+        status: MessageStatus.QUEUED,
+      },
+    });
 
     this.logger.log(`Enfileirando ${recipients.length} destinatários da campanha ${campaign.name}`);
 
@@ -83,8 +120,24 @@ export class QueueService {
       };
     });
 
-    // Adiciona todos os jobs em lote
-    await this.broadcastQueue.addBulk(jobs);
+    try {
+      // Adiciona todos os jobs em lote
+      await this.broadcastQueue.addBulk(jobs);
+    } catch (error) {
+      // Se falhar, retorna os destinatários para o status pendente
+      await this.prisma.campaignRecipient.updateMany({
+        where: {
+          id: {
+            in: recipientIdsToQueue,
+          },
+        },
+        data: {
+          status: MessageStatus.PENDING,
+        },
+      });
+
+      throw error;
+    }
 
     this.logger.log(
       `${jobs.length} mensagens enfileiradas com sucesso! Lotes: ${Math.ceil(recipients.length / campaign.batchSize)}`,
@@ -157,6 +210,25 @@ export class QueueService {
     const campaignJobs = jobs.filter((job) => job.data.campaignId === campaignId);
 
     await Promise.all(campaignJobs.map((job) => job.remove()));
+
+    const recipientIds = Array.from(
+      new Set(
+        campaignJobs.map((job) => job.data?.recipientId).filter((id): id is string => Boolean(id)),
+      ),
+    );
+
+    if (recipientIds.length > 0) {
+      await this.prisma.campaignRecipient.updateMany({
+        where: {
+          id: {
+            in: recipientIds,
+          },
+        },
+        data: {
+          status: MessageStatus.PENDING,
+        },
+      });
+    }
 
     this.logger.log(`${campaignJobs.length} jobs da campanha ${campaignId} removidos`);
 

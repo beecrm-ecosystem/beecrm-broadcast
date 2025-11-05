@@ -24,6 +24,7 @@ import {
   AddRecipientsDto,
   CampaignFilterDto,
   AddContactsDto,
+  TriggerBroadcastUpdateDto,
 } from './schemas/broadcast.dto';
 import {
   ApiBody,
@@ -571,6 +572,76 @@ export class BroadcastController {
       timestamp: new Date().toISOString(),
       ...result,
     };
+  }
+
+  /**
+   * POST /broadcast/:id/webhooks/status-update
+   * Dispara manualmente um webhook broadcast:statusUpdate (e opcionalmente update_status)
+   */
+  @Post(':id/webhooks/status-update')
+  @ApiOperation({ summary: 'Dispara manualmente um webhook de status da campanha' })
+  @ApiParam({ name: 'id', description: 'Identificador da campanha' })
+  @ApiBody({
+    description: 'Campos opcionais para sobrescrever status e contadores enviados ao CRM',
+    schema: {
+      type: 'object',
+      properties: {
+        status: {
+          type: 'string',
+          enum: ['DRAFT', 'SCHEDULED', 'PROCESSING', 'COMPLETED', 'PAUSED', 'CANCELED', 'FAILED'],
+          example: 'COMPLETED',
+        },
+        sendStatusEvent: {
+          type: 'boolean',
+          example: true,
+          description: 'Quando verdadeiro, também envia o webhook update_status',
+        },
+        totalContacts: { type: 'number', example: 1000 },
+        sentContacts: { type: 'number', example: 1000 },
+        deliveredContacts: { type: 'number', example: 950 },
+        readContacts: { type: 'number', example: 600 },
+        failedContacts: { type: 'number', example: 50 },
+        statusCode: { type: 'number', example: 1 },
+        link: {
+          type: 'string',
+          example: 'https://crm.exemplo.com/campaign/123',
+        },
+        error: {
+          type: 'string',
+          example: 'Mensagem customizada enviada manualmente',
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Webhook disparado com sucesso',
+    schema: {
+      type: 'object',
+      properties: {
+        message: {
+          type: 'string',
+          example: 'Webhooks de campanha disparados com sucesso',
+        },
+        status: {
+          type: 'string',
+          example: 'COMPLETED',
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Campanha não encontrada',
+    schema: notFoundErrorSchema,
+  })
+  @ApiResponse({
+    status: 500,
+    description: 'Erro ao disparar o webhook manual',
+    schema: internalServerErrorSchema,
+  })
+  async triggerStatusUpdate(@Param('id') id: string, @Body() payload: TriggerBroadcastUpdateDto) {
+    return this.broadcastService.triggerBroadcastUpdate(id, payload);
   }
 
   /**

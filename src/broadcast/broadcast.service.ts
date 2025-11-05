@@ -7,6 +7,7 @@ import {
   AddRecipientsDto,
   CampaignStatsDto,
   AddContactsDto,
+  TriggerBroadcastUpdateDto,
 } from './schemas/broadcast.dto';
 import { CampaignStatus } from '@prisma/client';
 import { CampaignWebhookService } from './services/campaign-webhook.service';
@@ -299,6 +300,13 @@ export class BroadcastService {
       failedContacts: updatedCampaign.failedCount,
     });
 
+    if (result.count > 0 && updatedCampaign.status === CampaignStatus.PROCESSING) {
+      this.logger.log(
+        `Campanha ${campaignId} está em processamento - enfileirando ${result.count} novos destinatários`,
+      );
+      await this.queueService.enqueueCampaign(campaignId, { allowEmpty: true });
+    }
+
     return {
       count: result.count,
       message: `${result.count} destinatários adicionados com sucesso`,
@@ -324,6 +332,48 @@ export class BroadcastService {
     };
 
     return this.addRecipients(campaignId, recipients);
+  }
+
+  /**
+   * Dispara manualmente um webhook de status/totais para o CRM
+   */
+  async triggerBroadcastUpdate(id: string, dto: TriggerBroadcastUpdateDto) {
+    const campaign = await this.findOne(id);
+
+    const resolvedStatus = dto.status ?? campaign.status;
+
+    const summaryOptions = {
+      status: resolvedStatus,
+      totalContacts: dto.totalContacts,
+      sentContacts: dto.sentContacts,
+      deliveredContacts: dto.deliveredContacts,
+      readContacts: dto.readContacts,
+      failedContacts: dto.failedContacts,
+      error: dto.error,
+      link: dto.link,
+    } as const;
+
+    this.logger.log(
+      `Disparando webhook broadcast:statusUpdate manual para campanha ${id} com status ${resolvedStatus}`,
+    );
+
+    await this.campaignWebhook.sendBroadcastSummary(campaign, summaryOptions);
+
+    if (dto.sendStatusEvent) {
+      this.logger.log(
+        `Disparando webhook update_status manual para campanha ${id} com status ${resolvedStatus}`,
+      );
+      await this.campaignWebhook.sendUpdateStatus(campaign, {
+        status: resolvedStatus,
+        statusCode: dto.statusCode,
+        link: dto.link,
+      });
+    }
+
+    return {
+      message: 'Webhooks de campanha disparados com sucesso',
+      status: resolvedStatus,
+    };
   }
 
   /**

@@ -75,11 +75,15 @@ export class DiogenesService {
       }
 
       const response = await firstValueFrom(
-        this.httpService.post<DiogenesResponse>(url, data, {
-          headers: {
-            apikey: this.apiKey,
+        this.httpService.post<DiogenesResponse>(
+          url,
+          { ...data, broadcast: true },
+          {
+            headers: {
+              apikey: this.apiKey,
+            },
           },
-        }),
+        ),
       );
 
       const payload = response?.data;

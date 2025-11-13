@@ -16,6 +16,7 @@ import { CampaignSchedulerService } from './services/campaign-scheduler.service'
 @Injectable()
 export class BroadcastService {
   private readonly logger = new Logger(BroadcastService.name);
+  private readonly SAO_PAULO_OFFSET_MINUTES = -3 * 60;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -758,7 +759,7 @@ export class BroadcastService {
   }
 
   private ensureFutureScheduledDate(rawDate: string | Date): Date {
-    const parsedDate = rawDate instanceof Date ? rawDate : new Date(rawDate);
+    const parsedDate = this.parseScheduledDate(rawDate);
 
     if (Number.isNaN(parsedDate.getTime())) {
       throw new Error('Data de início inválida. Use um formato ISO 8601.');
@@ -769,6 +770,94 @@ export class BroadcastService {
     }
 
     return parsedDate;
+  }
+
+  private parseScheduledDate(rawDate: string | Date): Date {
+    if (rawDate instanceof Date) {
+      return rawDate;
+    }
+
+    if (typeof rawDate !== 'string') {
+      throw new Error('Data de início inválida. Use um formato ISO 8601.');
+    }
+
+    const trimmed = rawDate.trim();
+    if (!trimmed) {
+      throw new Error('Data de início inválida. Use um formato ISO 8601.');
+    }
+
+    const lower = trimmed.toLowerCase();
+    const offsetMatch = trimmed.match(/([+-]\d{2}:?\d{2})$/);
+
+    if (offsetMatch) {
+      const normalizedIso = this.normalizeIsoString(trimmed);
+      const parsed = new Date(normalizedIso);
+
+      if (Number.isNaN(parsed.getTime())) {
+        throw new Error('Data de início inválida. Use um formato ISO 8601.');
+      }
+
+      const inputOffsetMinutes = this.parseOffsetMinutes(offsetMatch[1]);
+      if (inputOffsetMinutes === this.SAO_PAULO_OFFSET_MINUTES) {
+        return parsed;
+      }
+
+      if (inputOffsetMinutes === 0) {
+        const diffMinutes = this.SAO_PAULO_OFFSET_MINUTES;
+        return new Date(parsed.getTime() + diffMinutes * 60_000);
+      }
+
+      return parsed;
+    }
+
+    if (lower.endsWith('z')) {
+      const parsed = new Date(trimmed);
+
+      if (Number.isNaN(parsed.getTime())) {
+        throw new Error('Data de início inválida. Use um formato ISO 8601.');
+      }
+
+      const diffMinutes = this.SAO_PAULO_OFFSET_MINUTES - 0;
+      return new Date(parsed.getTime() + diffMinutes * 60_000);
+    }
+
+    return this.convertToSaoPauloTime(trimmed);
+  }
+
+  private normalizeIsoString(value: string): string {
+    return value.replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
+  }
+
+  private parseOffsetMinutes(offset: string): number {
+    const normalized = offset.replace(':', '');
+    const sign = normalized.startsWith('-') ? -1 : 1;
+    const hours = Number(normalized.slice(1, 3));
+    const minutes = Number(normalized.slice(3, 5));
+    return sign * (hours * 60 + minutes);
+  }
+
+  // Interprets the provided timestamp as America/Sao_Paulo local time and returns the UTC Date.
+  private convertToSaoPauloTime(valueWithoutOffset: string): Date {
+    const normalized = valueWithoutOffset.replace(' ', 'T');
+    const match = normalized.match(
+      /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,6}))?)?$/,
+    );
+
+    if (!match) {
+      throw new Error('Data de início inválida. Use um formato ISO 8601.');
+    }
+
+    const year = Number(match[1]);
+    const month = Number(match[2]) - 1;
+    const day = Number(match[3]);
+    const hour = Number(match[4]);
+    const minute = Number(match[5]);
+    const second = match[6] ? Number(match[6]) : 0;
+    const fraction = match[7] ? match[7].padEnd(3, '0').slice(0, 3) : '000';
+    const millisecond = Number(fraction);
+
+    const utcTimestamp = Date.UTC(year, month, day, hour + 3, minute, second, millisecond);
+    return new Date(utcTimestamp);
   }
 
   private sanitizeVariables(variables?: Record<string, any>): Record<string, string> | undefined {

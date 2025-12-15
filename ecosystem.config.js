@@ -27,7 +27,7 @@ module.exports = {
         NODE_ENV: 'production',
         NODE_OPTIONS: '--max-old-space-size=2048', // 2GB heap por instância
         LOG_LEVEL: 'info',
-        PORT: 3000,
+        PORT: 4000,
       },
       error_file: 'logs/api-error.log',
       out_file: 'logs/api-out.log',

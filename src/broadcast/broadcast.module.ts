@@ -1,6 +1,8 @@
 import { Module, NestModule, MiddlewareConsumer } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { HttpModule } from '@nestjs/axios';
+import { HttpModuleOptions } from '@nestjs/axios/dist/interfaces/http-module.interface';
+import { Agent } from 'https';
 import { BroadcastController } from './broadcast.controller';
 import { BroadcastService } from './broadcast.service';
 import { PrismaService } from './prisma.service';
@@ -33,6 +35,10 @@ import { CampaignMonitorProcessor } from './queues/campaign-monitor.processor';
     BullModule.registerQueue({
       name: 'broadcast-queue',
     }),
+    // Dead-letter queue para falhas definitivas
+    BullModule.registerQueue({
+      name: 'broadcast-dlq',
+    }),
     // Fila responsável por iniciar campanhas agendadas
     BullModule.registerQueue({
       name: 'campaign-scheduler-queue',
@@ -53,7 +59,10 @@ import { CampaignMonitorProcessor } from './queues/campaign-monitor.processor';
     HttpModule.register({
       timeout: 30000,
       maxRedirects: 5,
-    }),
+      // Keep-alive e conexões paralelas para reduzir latência por envio
+      httpAgent: new Agent({ keepAlive: true, maxSockets: 200 }),
+      httpsAgent: new Agent({ keepAlive: true, maxSockets: 200 }),
+    } as HttpModuleOptions),
   ],
   controllers: [
     BroadcastController,

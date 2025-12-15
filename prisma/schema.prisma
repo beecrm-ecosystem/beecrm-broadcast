@@ -175,8 +175,8 @@ model Campaign {
   completedAt     DateTime?       // Quando foi completada
   
   // Configurações de envio
-  batchSize       Int             @default(100)   // Quantidade de mensagens por lote
-  delayBetweenBatches Int         @default(5000)  // Delay em ms entre lotes
+  batchSize       Int             @default(500)   // Quantidade de mensagens por lote
+  delayBetweenBatches Int         @default(0)     // Delay em ms entre lotes
   
   // Destinatários
   recipients      CampaignRecipient[]
@@ -255,6 +255,7 @@ model CampaignRecipient {
   
   @@unique([campaignId, phoneNumber])
   @@index([campaignId])
+  @@index([campaignId, status])
   @@index([phoneNumber])
   @@map("campaign_recipients")
 }
@@ -310,6 +311,7 @@ model Message {
   updatedAt         DateTime      @updatedAt
   
   @@index([campaignId])
+  @@index([campaignId, status])
   @@index([recipientId])
   @@index([status])
   @@index([whatsappMessageId])

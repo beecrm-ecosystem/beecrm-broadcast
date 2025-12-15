@@ -81,11 +81,13 @@ export class QueueService {
     this.logger.log(`Enfileirando ${recipients.length} destinatários da campanha ${campaign.name}`);
 
     const templateData = campaign.templateData as any;
+    const batchSize = Math.max(1, campaign.batchSize || 1);
+    const delayBetweenBatches = Math.max(0, campaign.delayBetweenBatches ?? 0);
 
     // Adiciona cada destinatário na fila com delay progressivo
     const jobs = recipients.map((recipient, index) => {
-      const batchNumber = Math.floor(index / campaign.batchSize);
-      const delay = batchNumber * campaign.delayBetweenBatches;
+      const batchNumber = Math.floor(index / batchSize);
+      const delay = batchNumber * delayBetweenBatches;
 
       const jobData: SendMessageJob = {
         campaignId: campaign.id,
@@ -104,10 +106,10 @@ export class QueueService {
         data: jobData,
         opts: {
           delay,
-          attempts: 2, // Tenta 2 vezes em caso de falha (1 original + 1 retry)
+          attempts: 3, // 1 tentativa + 2 retries curtos
           backoff: {
             type: 'exponential',
-            delay: 3000, // 3s, depois 6s
+            delay: 1000, // 1s, depois 2s, 4s
           },
           removeOnComplete: {
             age: 3600, // Remove jobs completados após 1 hora
@@ -146,8 +148,8 @@ export class QueueService {
     return {
       totalEnqueued: jobs.length,
       batches: Math.ceil(recipients.length / campaign.batchSize),
-      batchSize: campaign.batchSize,
-      delayBetweenBatches: campaign.delayBetweenBatches,
+      batchSize,
+      delayBetweenBatches,
     };
   }
 
@@ -163,12 +165,28 @@ export class QueueService {
       this.broadcastQueue.getDelayedCount(),
     ]);
 
+    const paused = await this.broadcastQueue.isPaused();
+
+    // Coleta latência média aproximada (se disponível) usando timestamps de job
+    const jobs = await this.broadcastQueue.getJobs(['active', 'waiting', 'delayed'], 0, 50);
+    const now = Date.now();
+    const latencies = jobs
+      .map((job) =>
+        (job.processedOn ?? job.timestamp) ? now - (job.processedOn ?? job.timestamp) : 0,
+      )
+      .filter((v) => v > 0);
+    const avgLatencyMs = latencies.length
+      ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length)
+      : 0;
+
     return {
       waiting,
       active,
       completed,
       failed,
       delayed,
+      paused,
+      avgLatencyMs,
       total: waiting + active + completed + failed + delayed,
     };
   }

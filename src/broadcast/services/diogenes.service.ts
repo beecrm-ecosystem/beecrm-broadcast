@@ -54,6 +54,12 @@ export class DiogenesService {
   private readonly baseUrl = process.env.DIOGENES_URL || 'https://diogenes.beecrm.io';
   private readonly apiKey = process.env.HERMES_API_KEY;
   private readonly isTestMode = process.env.DIOGENES_TEST_MODE === 'true';
+  private readonly breaker = {
+    state: 'CLOSED' as 'CLOSED' | 'OPEN' | 'HALF_OPEN',
+    failures: 0,
+    nextRetryAt: 0,
+  };
+  private readonly MAX_FAILURES_BEFORE_OPEN = 3;
 
   constructor(private readonly httpService: HttpService) {}
 
@@ -62,6 +68,12 @@ export class DiogenesService {
    */
   async sendTemplate(channel: string, data: SendTemplateDto): Promise<DiogenesResponse> {
     const url = `${this.baseUrl}/message/sendTemplate/${channel}`;
+
+    // Circuit breaker: bloqueia chamadas durante cooldown
+    if (this.isCircuitOpen()) {
+      const waitMs = Math.max(0, this.breaker.nextRetryAt - Date.now());
+      throw new Error(`Circuit breaker aberto para Diogenes. Aguarde ${waitMs}ms`);
+    }
 
     try {
       this.logger.log(`Enviando mensagem para ${data.number} via ${channel}`);
@@ -99,6 +111,9 @@ export class DiogenesService {
 
       this.logger.log(`Mensagem enviada com sucesso. ID: ${payload.key.id}`);
 
+      // Sucesso fecha o circuito
+      this.resetBreaker();
+
       return payload;
     } catch (error) {
       this.logger.error(`Erro ao enviar mensagem para ${data.number}: ${error.message}`);
@@ -108,6 +123,19 @@ export class DiogenesService {
         this.logger.error(`Status: ${error.response.status}`);
         this.logger.error(`URL chamada: ${url}`);
         this.logger.error(`Response: ${JSON.stringify(error.response.data)}`);
+      }
+
+      const status = error.response?.status as number | undefined;
+      const backoffMs = this.recordBreakerFailure(status, error.response?.headers);
+      if (backoffMs > 0) {
+        this.logger.warn(`Backoff adaptativo de ${backoffMs}ms após status ${status ?? 'N/A'}`);
+        await this.delay(backoffMs);
+      }
+
+      // Backpressure: sinaliza pausa do enfileiramento em caso de 429/5xx
+      if (status === 429 || (status !== undefined && status >= 500)) {
+        this.logger.warn('Sugerindo pausa do enfileiramento devido a erros 429/5xx.');
+        throw new Error('BACKPRESSURE: pause enqueue');
       }
 
       throw error;
@@ -361,5 +389,68 @@ export class DiogenesService {
     }
 
     return String(value);
+  }
+
+  private isCircuitOpen(): boolean {
+    if (this.breaker.state === 'OPEN') {
+      const now = Date.now();
+      if (now >= this.breaker.nextRetryAt) {
+        this.breaker.state = 'HALF_OPEN';
+        return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  private resetBreaker() {
+    this.breaker.state = 'CLOSED';
+    this.breaker.failures = 0;
+    this.breaker.nextRetryAt = 0;
+  }
+
+  private recordBreakerFailure(status?: number, headers?: Record<string, any>): number {
+    const shouldTrip = status === 429 || (status !== undefined && status >= 500);
+    if (!shouldTrip) {
+      return 0;
+    }
+
+    this.breaker.failures += 1;
+
+    const backoffMs = this.computeBackoffMs(status, headers, this.breaker.failures);
+
+    if (this.breaker.failures >= this.MAX_FAILURES_BEFORE_OPEN) {
+      const cooldown = Math.min(60000, backoffMs * 2 || 5000);
+      this.breaker.state = 'OPEN';
+      this.breaker.nextRetryAt = Date.now() + cooldown;
+      this.logger.warn(`Circuit breaker aberto por ${cooldown}ms após status ${status}`);
+    }
+
+    return backoffMs;
+  }
+
+  private computeBackoffMs(
+    status: number | undefined,
+    headers: Record<string, any> | undefined,
+    failures: number,
+  ): number {
+    const retryAfterHeader = headers?.['retry-after'] ?? headers?.['Retry-After'];
+    if (retryAfterHeader) {
+      const retrySeconds = Number(retryAfterHeader);
+      if (!Number.isNaN(retrySeconds) && retrySeconds > 0) {
+        return retrySeconds * 1000;
+      }
+    }
+
+    const base = status === 429 ? 2000 : 500;
+    const exp = Math.min(failures - 1, 4); // cap no expoente
+    return Math.min(15000, base * Math.pow(2, exp));
+  }
+
+  private async delay(ms: number): Promise<void> {
+    if (ms <= 0) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, ms));
   }
 }

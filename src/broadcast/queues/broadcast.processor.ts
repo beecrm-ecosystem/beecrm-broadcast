@@ -1,4 +1,4 @@
-import { Processor, WorkerHost } from '@nestjs/bullmq';
+import { InjectQueue, Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 import { MessageStatus } from '@prisma/client';
@@ -8,6 +8,7 @@ import {
   CampaignWebhookService,
   BroadcastMessageSummary,
 } from '../services/campaign-webhook.service';
+import { Queue } from 'bullmq';
 
 export interface SendMessageJob {
   campaignId: string;
@@ -21,7 +22,18 @@ export interface SendMessageJob {
   templateLanguage: string;
 }
 
-@Processor('broadcast-queue')
+interface DeadLetterJob {
+  campaignId: string;
+  recipientId: string;
+  phoneNumber: string;
+  error: string;
+  errorCode?: number | string;
+  attempts: number;
+  permanent: boolean;
+  timestamp: string;
+}
+
+@Processor('broadcast-queue', { concurrency: 100 })
 export class BroadcastProcessor extends WorkerHost {
   private readonly logger = new Logger(BroadcastProcessor.name);
   // Cache para controlar envio de webhooks de progresso
@@ -29,11 +41,17 @@ export class BroadcastProcessor extends WorkerHost {
   // Envia webhook a cada X mensagens ou Y segundos
   private readonly PROGRESS_THRESHOLD = 10; // Mensagens
   private readonly PROGRESS_INTERVAL = 30000; // 30 segundos
+  // Buffer para reduzir writes síncronos de contadores
+  private readonly counterBuffer = new Map<
+    string,
+    { sentDelta: number; failedDelta: number; lastFlush: number; flushPromise?: Promise<void> }
+  >();
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly diogenesService: DiogenesService,
     private readonly campaignWebhookService: CampaignWebhookService,
+    @InjectQueue('broadcast-dlq') private readonly dlq: Queue<DeadLetterJob>,
   ) {
     super();
   }
@@ -99,16 +117,16 @@ export class BroadcastProcessor extends WorkerHost {
         },
       });
 
-      // Atualiza contadores da campanha
-      const updatedCampaign = await this.prisma.campaign.update({
-        where: { id: campaignId },
-        data: {
-          sentCount: { increment: 1 },
-        },
-      });
+      // Atualiza contadores da campanha com buffer (reduz writes)
+      await this.bufferCounters(campaignId, { sentDelta: 1 });
 
       // Envia webhook de progresso (throttled)
-      await this.sendProgressWebhook(updatedCampaign);
+      const updatedCampaign = await this.prisma.campaign.findUnique({
+        where: { id: campaignId },
+      });
+      if (updatedCampaign) {
+        await this.sendProgressWebhook(updatedCampaign);
+      }
 
       // Verifica se todos os destinatários foram processados
       await this.checkAndCompleteCampaign(campaignId);
@@ -147,27 +165,42 @@ export class BroadcastProcessor extends WorkerHost {
         },
       });
 
-      // Atualiza contador de falhas
-      const updatedCampaign = await this.prisma.campaign.update({
-        where: { id: campaignId },
-        data: {
-          failedCount: { increment: 1 },
-        },
-      });
+      // Atualiza contador de falhas via buffer
+      await this.bufferCounters(campaignId, { failedDelta: 1 });
 
       // Envia webhook de progresso (throttled)
-      await this.sendProgressWebhook(updatedCampaign);
+      const updatedCampaign = await this.prisma.campaign.findUnique({
+        where: { id: campaignId },
+      });
+      if (updatedCampaign) {
+        await this.sendProgressWebhook(updatedCampaign);
+      }
 
       // Verifica se todos os destinatários foram processados
       await this.checkAndCompleteCampaign(campaignId);
 
-      // Se for erro permanente, não faz retry (retorna sucesso para o BullMQ não tentar novamente)
-      if (isPermanentError) {
-        this.logger.warn(`Job marcado como concluído (falha permanente)`);
+      const attempts = job.opts.attempts ?? 1;
+      const isLastAttempt = job.attemptsMade + 1 >= attempts;
+
+      if (isPermanentError || isLastAttempt) {
+        this.logger.warn(
+          `Job marcado como concluído (${isPermanentError ? 'falha permanente' : 'última tentativa esgotada'})`,
+        );
+
+        await this.pushToDlq({
+          campaignId,
+          recipientId,
+          phoneNumber: recipientPhone,
+          error: error.message,
+          errorCode: error.response?.status,
+          attempts: job.attemptsMade + 1,
+          permanent: Boolean(isPermanentError),
+        });
+
         return {
           success: false,
           error: error.message,
-          permanent: true,
+          permanent: isPermanentError,
         };
       }
 
@@ -237,6 +270,9 @@ export class BroadcastProcessor extends WorkerHost {
    * Verifica se todos os destinatários foram processados e completa a campanha
    */
   private async checkAndCompleteCampaign(campaignId: string) {
+    // Garante flush de contadores pendentes antes de checar conclusão
+    await this.flushCounters(campaignId, true);
+
     this.logger.debug(`🔍 Verificando conclusão da campanha ${campaignId}`);
 
     const campaign = await this.prisma.campaign.findUnique({
@@ -308,6 +344,93 @@ export class BroadcastProcessor extends WorkerHost {
         failedMessages,
       });
       this.logger.log(`📬 Webhooks finais enviados para campanha ${campaignId}`);
+    }
+  }
+
+  private async bufferCounters(
+    campaignId: string,
+    deltas: { sentDelta?: number; failedDelta?: number },
+  ): Promise<void> {
+    const now = Date.now();
+    const entry =
+      this.counterBuffer.get(campaignId) ||
+      ({ sentDelta: 0, failedDelta: 0, lastFlush: now } as const as {
+        sentDelta: number;
+        failedDelta: number;
+        lastFlush: number;
+        flushPromise?: Promise<void>;
+      });
+
+    entry.sentDelta += deltas.sentDelta ?? 0;
+    entry.failedDelta += deltas.failedDelta ?? 0;
+    this.counterBuffer.set(campaignId, entry);
+
+    const totalDelta = entry.sentDelta + entry.failedDelta;
+    const elapsed = now - entry.lastFlush;
+    const shouldFlush = totalDelta >= 50 || elapsed >= 2000;
+
+    if (shouldFlush) {
+      await this.flushCounters(campaignId, false);
+    }
+  }
+
+  private async flushCounters(campaignId: string, force: boolean): Promise<void> {
+    const entry = this.counterBuffer.get(campaignId);
+    if (!entry) {
+      return;
+    }
+
+    const now = Date.now();
+    const totalDelta = entry.sentDelta + entry.failedDelta;
+    if (!force && totalDelta === 0) {
+      return;
+    }
+
+    const sentDelta = entry.sentDelta;
+    const failedDelta = entry.failedDelta;
+    entry.sentDelta = 0;
+    entry.failedDelta = 0;
+    entry.lastFlush = now;
+    this.counterBuffer.set(campaignId, entry);
+
+    if (sentDelta === 0 && failedDelta === 0) {
+      return;
+    }
+
+    await this.prisma.campaign.update({
+      where: { id: campaignId },
+      data: {
+        sentCount: { increment: sentDelta },
+        failedCount: { increment: failedDelta },
+      },
+    });
+  }
+
+  private async pushToDlq(job: {
+    campaignId: string;
+    recipientId: string;
+    phoneNumber: string;
+    error: string;
+    errorCode?: number | string;
+    attempts: number;
+    permanent: boolean;
+  }): Promise<void> {
+    try {
+      await this.dlq.add(
+        'failed-message',
+        {
+          ...job,
+          timestamp: new Date().toISOString(),
+        },
+        {
+          removeOnComplete: { age: 86400, count: 1000 },
+          removeOnFail: { age: 86400 },
+        },
+      );
+    } catch (err) {
+      this.logger.error(
+        `Falha ao enviar job para DLQ: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 

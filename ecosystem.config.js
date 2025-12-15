@@ -20,7 +20,7 @@ module.exports = {
     // ============ API HTTP (2-4 instâncias) ============
     {
       name: 'api',
-      script: 'dist/main.js',
+      script: 'dist/src/main.js',
       instances: 2, // base = 2, pode chegar a 4 em pico (pm2 scale api 4)
       exec_mode: 'cluster',
       env: {
@@ -45,7 +45,7 @@ module.exports = {
     // Cada worker: concurrency 100, ~100-150 msg/s, usando 2-2.5GB RAM
     {
       name: 'worker',
-      script: 'dist/worker.js',
+      script: 'dist/src/worker.js',
       instances: 5, // base = 5 (pode escalar até 7 em carga máxima)
       exec_mode: 'fork', // fork pois cada worker tem seu próprio event loop
       env: {

@@ -7,14 +7,14 @@
 
 import { NestFactory } from '@nestjs/core';
 import { Logger } from '@nestjs/common';
-import { BroadcastModule } from './broadcast/broadcast.module';
+import { AppModule } from './app.module';
 
 async function startWorker() {
   const logger = new Logger('WorkerBootstrap');
 
   try {
-    // Cria aplicação Nest sem iniciar listener HTTP
-    const app = await NestFactory.create(BroadcastModule, {
+    // Cria aplicação Nest com AppModule para carregar BullModule.forRoot (Redis)
+    const app = await NestFactory.create(AppModule, {
       logger: ['log', 'error', 'warn', 'debug'],
     });
 

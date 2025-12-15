@@ -32,7 +32,7 @@ module.exports = {
       error_file: 'logs/api-error.log',
       out_file: 'logs/api-out.log',
       log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
-      max_memory_restart: '2.5G', // reinicia se exceder 2.5GB
+      max_memory_restart: '2560M', // reinicia se exceder 2.5GB
       max_restarts: 10,
       min_uptime: '10s',
       watch: false,
@@ -56,7 +56,7 @@ module.exports = {
       error_file: 'logs/worker-error.log',
       out_file: 'logs/worker-out.log',
       log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
-      max_memory_restart: '2.8G', // um pouco acima do heap para margem
+      max_memory_restart: '2816M', // um pouco acima do heap para margem
       max_restarts: 10,
       min_uptime: '10s',
       watch: false,

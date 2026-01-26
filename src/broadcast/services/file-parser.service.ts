@@ -104,13 +104,35 @@ export class FileParserService {
       const metadata: Record<string, any> = {};
 
       for (const [key, value] of Object.entries(row)) {
-        if (key.startsWith('CF_')) {
-          // Remove o prefixo CF_ e converte para lowercase
-          const variableName = key.replace('CF_', '').toLowerCase();
-          variables[variableName] = value;
-        } else if (!['NAME', 'PHONE', 'EMAIL', 'SUBSCRIBED'].includes(key)) {
+        const rawKey = String(key).trim();
+        const upperKey = rawKey.toUpperCase();
+
+        if (upperKey.startsWith('CF_')) {
+          // Mantém chaves com e sem prefixo CF_ para compatibilidade
+          const strippedKey = rawKey.replace(/^CF_/i, '').trim();
+          const strippedLower = strippedKey.toLowerCase();
+          const strippedUpper = strippedKey.toUpperCase();
+          const cfUpper = `CF_${strippedUpper}`;
+          const cfLower = `CF_${strippedLower}`;
+
+          if (rawKey) {
+            variables[rawKey] = value;
+          }
+          if (strippedLower) {
+            variables[strippedLower] = value;
+          }
+          if (strippedUpper) {
+            variables[strippedUpper] = value;
+          }
+          if (cfUpper) {
+            variables[cfUpper] = value;
+          }
+          if (cfLower) {
+            variables[cfLower] = value;
+          }
+        } else if (!['NAME', 'PHONE', 'EMAIL', 'SUBSCRIBED'].includes(upperKey)) {
           // Outros campos vão para metadata
-          metadata[key.toLowerCase()] = value;
+          metadata[rawKey.toLowerCase()] = value;
         }
       }
 

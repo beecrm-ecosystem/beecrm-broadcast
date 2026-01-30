@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Detalhes da Campanha - BeeCRM Broadcast</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-content">
+            <h1>🐝 BeeCRM Broadcast</h1>
+            <div class="nav-actions">
+                <a href="campaigns.html" class="btn-secondary">← Voltar</a>
+                <button onclick="logout()" class="btn-secondary">Sair</button>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container">
+        <div id="campaignHeader" class="campaign-header"></div>
+
+        <div class="stats-grid" id="statsGrid"></div>
+
+        <div class="tabs">
+            <button class="tab-button active" onclick="showTab('overview')">Visão Geral</button>
+            <button class="tab-button" onclick="showTab('recipients')">Destinatários</button>
+            <button class="tab-button" onclick="showTab('errors')">Análise de Erros</button>
+            <button class="tab-button" onclick="showTab('engagement')">Engajamento</button>
+        </div>
+
+        <div id="overview" class="tab-content active">
+            <div class="card">
+                <h3>Taxa de Sucesso</h3>
+                <div id="ratesChart" class="chart-container"></div>
+            </div>
+            <div class="card">
+                <h3>Distribuição de Status</h3>
+                <div id="statusDistribution"></div>
+            </div>
+        </div>
+
+        <div id="recipients" class="tab-content">
+            <div class="card">
+                <div class="card-header">
+                    <h3>Destinatários</h3>
+                    <div class="header-actions">
+                        <input type="text" id="recipientSearch" placeholder="Buscar..." class="search-input-small">
+                        <select id="recipientStatusFilter" class="filter-select-small">
+                            <option value="">Todos</option>
+                            <option value="SENT">Enviado</option>
+                            <option value="DELIVERED">Entregue</option>
+                            <option value="READ">Lido</option>
+                            <option value="FAILED">Falha</option>
+                        </select>
+                    </div>
+                </div>
+                <div id="recipientsTable"></div>
+                <div class="pagination">
+                    <button id="prevPageRecipients" onclick="previousPageRecipients()" class="btn-secondary">← Anterior</button>
+                    <span id="pageInfoRecipients"></span>
+                    <button id="nextPageRecipients" onclick="nextPageRecipients()" class="btn-secondary">Próxima →</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="errors" class="tab-content">
+            <div class="card">
+                <h3>Análise de Erros</h3>
+                <div id="errorsAnalysis"></div>
+            </div>
+        </div>
+
+        <div id="engagement" class="tab-content">
+            <div class="card">
+                <h3>Engajamento por Hora</h3>
+                <div id="hourlyEngagement"></div>
+            </div>
+            <div class="card">
+                <h3>Melhores Horários</h3>
+                <div id="bestHours"></div>
+            </div>
+        </div>
+
+        <div id="actions" class="campaign-actions">
+            <button id="requeueBtn" onclick="requeueCampaign()" class="btn-warning">🔄 Reenfileirar</button>
+            <button id="pauseBtn" onclick="pauseCampaign()" class="btn-secondary">⏸️ Pausar</button>
+            <button id="resumeBtn" onclick="resumeCampaign()" class="btn-primary">▶️ Retomar</button>
+            <button id="cancelBtn" onclick="cancelCampaign()" class="btn-danger">❌ Cancelar</button>
+        </div>
+    </div>
+
+    <script src="js/auth.js"></script>
+    <script src="js/campaign-details.js"></script>
+</body>
+</html>

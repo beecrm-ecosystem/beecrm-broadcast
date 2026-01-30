@@ -1074,6 +1074,44 @@ export class BroadcastController {
   }
 
   /**
+   * POST /broadcast/:id/requeue
+   * Reenfileira destinatários pendentes de uma campanha
+   */
+  @Post(':id/requeue')
+  @ApiOperation({ summary: 'Reenfileira destinatários pendentes de uma campanha' })
+  @ApiParam({ name: 'id', description: 'Identificador da campanha' })
+  @ApiResponse({
+    status: 200,
+    description: 'Campanha reenfileirada com sucesso',
+    schema: {
+      type: 'object',
+      properties: {
+        campaignId: { type: 'string' },
+        status: { type: 'string', example: 'PROCESSING' },
+        removedJobs: { type: 'number' },
+        resetQueued: { type: 'number' },
+        enqueued: { type: 'number' },
+        batches: { type: 'number' },
+        batchSize: { type: 'number' },
+        delayBetweenBatches: { type: 'number' },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Campanha não encontrada',
+    schema: notFoundErrorSchema,
+  })
+  @ApiResponse({
+    status: 500,
+    description: 'Erro interno ao reenfileirar campanha',
+    schema: internalServerErrorSchema,
+  })
+  async requeue(@Param('id') id: string) {
+    return this.broadcastService.requeueCampaign(id);
+  }
+
+  /**
    * POST /broadcast/:id/cancel
    * Cancela uma campanha
    */

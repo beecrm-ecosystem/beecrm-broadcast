@@ -505,6 +505,54 @@ export class BroadcastService {
   }
 
   /**
+   * Reenfileira destinatários pendentes de uma campanha em processamento
+   */
+  async requeueCampaign(id: string) {
+    const campaign = await this.findOne(id);
+
+    if (!['PROCESSING', 'PAUSED'].includes(campaign.status)) {
+      throw new Error('Apenas campanhas em processamento ou pausadas podem ser reenfileiradas');
+    }
+
+    if (campaign.status === 'PAUSED') {
+      await this.prisma.campaign.update({
+        where: { id },
+        data: { status: 'PROCESSING' },
+      });
+    }
+
+    const removedJobs = await this.queueService.removeCampaignJobs(id);
+
+    // Garante que destinatários travados em QUEUED voltem para PENDING
+    const resetQueued = await this.prisma.campaignRecipient.updateMany({
+      where: {
+        campaignId: id,
+        status: 'QUEUED',
+      },
+      data: {
+        status: 'PENDING',
+      },
+    });
+
+    const queueResult = await this.queueService.enqueueCampaign(id, { allowEmpty: true });
+
+    this.logger.log(
+      `Reenfileiramento concluído: ${id} | jobs removidos=${removedJobs.removed} | resetQueued=${resetQueued.count} | enfileirados=${queueResult.totalEnqueued}`,
+    );
+
+    return {
+      campaignId: id,
+      status: 'PROCESSING',
+      removedJobs: removedJobs.removed,
+      resetQueued: resetQueued.count,
+      enqueued: queueResult.totalEnqueued,
+      batches: queueResult.batches,
+      batchSize: queueResult.batchSize,
+      delayBetweenBatches: queueResult.delayBetweenBatches,
+    };
+  }
+
+  /**
    * Cancela uma campanha
    */
   async cancelCampaign(id: string) {

@@ -387,7 +387,7 @@ export class BroadcastService {
 
     const [recipients, total] = await Promise.all([
       this.prisma.campaignRecipient.findMany({
-        where: { campaignId, isActive: true },
+        where: { campaignId },
         skip,
         take: limit,
         include: {
@@ -407,7 +407,7 @@ export class BroadcastService {
         },
       }),
       this.prisma.campaignRecipient.count({
-        where: { campaignId, isActive: true },
+        where: { campaignId },
       }),
     ]);
 

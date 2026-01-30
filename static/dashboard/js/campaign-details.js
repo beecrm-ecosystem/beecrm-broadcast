@@ -262,7 +262,6 @@ function renderRecipients() {
                         <th>Nome</th>
                         <th>Telefone</th>
                         <th>Status</th>
-                        <th>Ativo</th>
                         <th>Enviado</th>
                         <th>Entregue</th>
                         <th>Lido</th>
@@ -277,7 +276,6 @@ function renderRecipients() {
                                 <td>${r.name || 'N/A'}</td>
                                 <td>${r.phoneNumber}</td>
                                 <td><span class="status-badge status-${r.status}">${r.status}</span></td>
-                                <td>${r.isActive ? '✅' : '❌'}</td>
                                 <td>${msg?.sentAt ? new Date(msg.sentAt).toLocaleString('pt-BR') : '-'}</td>
                                 <td>${msg?.deliveredAt ? new Date(msg.deliveredAt).toLocaleString('pt-BR') : '-'}</td>
                                 <td>${msg?.readAt ? new Date(msg.readAt).toLocaleString('pt-BR') : '-'}</td>

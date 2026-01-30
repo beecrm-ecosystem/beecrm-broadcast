@@ -45,9 +45,12 @@
                 <div class="card-header">
                     <h3>Destinatários</h3>
                     <div class="header-actions">
+                        <button onclick="exportRecipients()" class="btn-primary" style="padding: 8px 16px; font-size: 0.9rem;">📥 Exportar CSV</button>
                         <input type="text" id="recipientSearch" placeholder="Buscar..." class="search-input-small">
                         <select id="recipientStatusFilter" class="filter-select-small">
                             <option value="">Todos</option>
+                            <option value="PENDING">Pendente</option>
+                            <option value="QUEUED">Na Fila</option>
                             <option value="SENT">Enviado</option>
                             <option value="DELIVERED">Entregue</option>
                             <option value="READ">Lido</option>

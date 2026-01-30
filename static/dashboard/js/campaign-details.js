@@ -8,8 +8,12 @@ if (!campaignId) {
 let campaign = null;
 let stats = null;
 let recipients = [];
+let allRecipients = [];
+let filteredRecipients = [];
 let currentTab = 'overview';
 let recipientsPage = 1;
+let recipientStatusFilter = '';
+let recipientSearchTerm = '';
 
 // Carrega dados da campanha
 async function loadCampaignData() {
@@ -90,8 +94,51 @@ function renderStats() {
 
 // Renderiza visão geral
 function renderOverview() {
+    const ratesChart = document.getElementById('ratesChart');
     const statusDist = document.getElementById('statusDistribution');
     const s = stats.stats;
+    
+    // Renderiza gráfico de taxas
+    ratesChart.innerHTML = `
+        <div style="display: grid; gap: 15px; padding: 20px;">
+            <div>
+                <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                    <span>Taxa de Sucesso (Enviados)</span>
+                    <strong>${stats.rates.success}</strong>
+                </div>
+                <div style="background: #ecf0f1; border-radius: 10px; height: 20px; overflow: hidden;">
+                    <div style="background: #27ae60; height: 100%; width: ${stats.rates.success}; transition: width 0.3s;"></div>
+                </div>
+            </div>
+            <div>
+                <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                    <span>Taxa de Entrega</span>
+                    <strong>${stats.rates.delivery}</strong>
+                </div>
+                <div style="background: #ecf0f1; border-radius: 10px; height: 20px; overflow: hidden;">
+                    <div style="background: #3498db; height: 100%; width: ${stats.rates.delivery}; transition: width 0.3s;"></div>
+                </div>
+            </div>
+            <div>
+                <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                    <span>Taxa de Leitura</span>
+                    <strong>${stats.rates.read}</strong>
+                </div>
+                <div style="background: #ecf0f1; border-radius: 10px; height: 20px; overflow: hidden;">
+                    <div style="background: #9b59b6; height: 100%; width: ${stats.rates.read}; transition: width 0.3s;"></div>
+                </div>
+            </div>
+            <div>
+                <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                    <span>Taxa de Falha</span>
+                    <strong>${stats.rates.failure}</strong>
+                </div>
+                <div style="background: #ecf0f1; border-radius: 10px; height: 20px; overflow: hidden;">
+                    <div style="background: #e74c3c; height: 100%; width: ${stats.rates.failure}; transition: width 0.3s;"></div>
+                </div>
+            </div>
+        </div>
+    `;
     
     statusDist.innerHTML = `
         <div style="display: grid; gap: 10px;">
@@ -129,8 +176,11 @@ function showTab(tabName) {
     document.querySelector(`[onclick="showTab('${tabName}')"]`)?.classList.add('active');
     document.getElementById(tabName)?.classList.add('active');
     
-    if (tabName === 'recipients' && recipients.length === 0) {
-        loadRecipients();
+    if (tabName === 'recipients') {
+        if (allRecipients.length === 0) {
+            loadRecipients();
+        }
+        setupRecipientsFilters();
     } else if (tabName === 'errors') {
         loadErrorsAnalysis();
     } else if (tabName === 'engagement') {
@@ -141,20 +191,54 @@ function showTab(tabName) {
 // Carrega destinatários
 async function loadRecipients(page = 1) {
     try {
-        const response = await fetch(`${API_BASE}/broadcast/${campaignId}/recipients?page=${page}&limit=50`, {
-            headers: getHeaders()
-        });
+        // Carrega todos os destinatários para permitir filtros locais
+        if (allRecipients.length === 0) {
+            const response = await fetch(`${API_BASE}/broadcast/${campaignId}/recipients?page=1&limit=1000`, {
+                headers: getHeaders()
+            });
+            
+            if (!response.ok) throw new Error('Erro ao carregar destinatários');
+            
+            const data = await response.json();
+            allRecipients = data.data || [];
+        }
         
-        if (!response.ok) throw new Error('Erro ao carregar destinatários');
-        
-        const data = await response.json();
-        recipients = data.data || [];
-        
-        renderRecipients();
-        updateRecipientsPagination(data.meta);
+        applyRecipientsFilters();
+        renderRecipientsPaginated(page);
     } catch (error) {
         alert('Erro ao carregar destinatários: ' + error.message);
     }
+}
+
+// Aplica filtros aos destinatários
+function applyRecipientsFilters() {
+    filteredRecipients = allRecipients.filter(r => {
+        const matchesStatus = !recipientStatusFilter || r.status === recipientStatusFilter;
+        const matchesSearch = !recipientSearchTerm || 
+            r.name?.toLowerCase().includes(recipientSearchTerm.toLowerCase()) ||
+            r.phoneNumber?.includes(recipientSearchTerm);
+        
+        return matchesStatus && matchesSearch;
+    });
+}
+
+// Renderiza destinatários paginados
+function renderRecipientsPaginated(page = 1) {
+    const pageSize = 50;
+    const start = (page - 1) * pageSize;
+    const end = start + pageSize;
+    const paginatedRecipients = filteredRecipients.slice(start, end);
+    
+    recipients = paginatedRecipients;
+    renderRecipients();
+    
+    const totalPages = Math.ceil(filteredRecipients.length / pageSize);
+    updateRecipientsPagination({
+        page,
+        total: filteredRecipients.length,
+        totalPages,
+        limit: pageSize
+    });
 }
 
 // Renderiza destinatários
@@ -167,6 +251,10 @@ function renderRecipients() {
     }
     
     table.innerHTML = `
+        <div style="margin-bottom: 15px; color: #7f8c8d;">
+            Mostrando ${recipients.length} de ${filteredRecipients.length} destinatários
+            ${filteredRecipients.length !== allRecipients.length ? `(${allRecipients.length} total)` : ''}
+        </div>
         <div class="table-container">
             <table>
                 <thead>
@@ -174,6 +262,7 @@ function renderRecipients() {
                         <th>Nome</th>
                         <th>Telefone</th>
                         <th>Status</th>
+                        <th>Ativo</th>
                         <th>Enviado</th>
                         <th>Entregue</th>
                         <th>Lido</th>
@@ -188,10 +277,11 @@ function renderRecipients() {
                                 <td>${r.name || 'N/A'}</td>
                                 <td>${r.phoneNumber}</td>
                                 <td><span class="status-badge status-${r.status}">${r.status}</span></td>
+                                <td>${r.isActive ? '✅' : '❌'}</td>
                                 <td>${msg?.sentAt ? new Date(msg.sentAt).toLocaleString('pt-BR') : '-'}</td>
                                 <td>${msg?.deliveredAt ? new Date(msg.deliveredAt).toLocaleString('pt-BR') : '-'}</td>
                                 <td>${msg?.readAt ? new Date(msg.readAt).toLocaleString('pt-BR') : '-'}</td>
-                                <td>${msg?.errorMessage || '-'}</td>
+                                <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;" title="${msg?.errorMessage || ''}">${msg?.errorMessage || '-'}</td>
                             </tr>
                         `;
                     }).join('')}
@@ -216,12 +306,72 @@ function updateRecipientsPagination(meta) {
 
 function previousPageRecipients() {
     if (recipientsPage > 1) {
-        loadRecipients(recipientsPage - 1);
+        renderRecipientsPaginated(recipientsPage - 1);
     }
 }
 
 function nextPageRecipients() {
-    loadRecipients(recipientsPage + 1);
+    renderRecipientsPaginated(recipientsPage + 1);
+}
+
+// Event listeners para filtros
+function setupRecipientsFilters() {
+    document.getElementById('recipientSearch')?.addEventListener('input', (e) => {
+        recipientSearchTerm = e.target.value;
+        applyRecipientsFilters();
+        renderRecipientsPaginated(1);
+    });
+    
+    document.getElementById('recipientStatusFilter')?.addEventListener('change', (e) => {
+        recipientStatusFilter = e.target.value;
+        applyRecipientsFilters();
+        renderRecipientsPaginated(1);
+    });
+}
+
+// Exporta destinatários filtrados para CSV
+function exportRecipients() {
+    if (filteredRecipients.length === 0) {
+        alert('Nenhum destinatário para exportar');
+        return;
+    }
+    
+    const headers = ['Nome', 'Telefone', 'Status', 'Ativo', 'Enviado Em', 'Entregue Em', 'Lido Em', 'Falha Em', 'Código Erro', 'Mensagem Erro'];
+    
+    const rows = filteredRecipients.map(r => {
+        const msg = r.messages?.[0];
+        return [
+            r.name || '',
+            r.phoneNumber || '',
+            r.status || '',
+            r.isActive ? 'Sim' : 'Não',
+            msg?.sentAt ? new Date(msg.sentAt).toLocaleString('pt-BR') : '',
+            msg?.deliveredAt ? new Date(msg.deliveredAt).toLocaleString('pt-BR') : '',
+            msg?.readAt ? new Date(msg.readAt).toLocaleString('pt-BR') : '',
+            msg?.failedAt ? new Date(msg.failedAt).toLocaleString('pt-BR') : '',
+            msg?.errorCode || '',
+            (msg?.errorMessage || '').replace(/"/g, '""')
+        ];
+    });
+    
+    const csvContent = [
+        headers.map(h => `"${h}"`).join(','),
+        ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
+    ].join('\n');
+    
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    
+    link.setAttribute('href', url);
+    link.setAttribute('download', `campanha-${campaignId}-destinatarios-${new Date().toISOString().split('T')[0]}.csv`);
+    link.style.visibility = 'hidden';
+    
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    alert(`${filteredRecipients.length} destinatários exportados com sucesso!`);
 }
 
 // Análise de erros
@@ -412,4 +562,5 @@ async function cancelCampaign() {
 // Carrega ao iniciar
 if (checkAuth()) {
     loadCampaignData();
+    setupRecipientsFilters();
 }

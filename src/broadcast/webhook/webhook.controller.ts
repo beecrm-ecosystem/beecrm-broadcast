@@ -1,6 +1,7 @@
 import { Controller, Post, Body, Logger, Get } from '@nestjs/common';
 import { ApiBody, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { WebhookQueueService } from '../services/webhook-queue.service';
+import { RcsWebhookDto } from './rcs-webhook.dto';
 
 // Formato oficial do Meta WhatsApp Business API
 export interface MetaWhatsAppWebhookDto {
@@ -214,6 +215,69 @@ export class WebhookController {
       };
     } catch (error) {
       this.logger.error(`❌ Erro ao adicionar webhook à fila: ${error.message}`);
+      return {
+        success: false,
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * Recebe webhooks de status RCS da Pontaltech
+   * Os webhooks são adicionados a uma fila para processamento assíncrono
+   */
+  @Post('rcs')
+  @ApiOperation({ summary: 'Recebe webhooks de status RCS da Pontaltech' })
+  @ApiBody({
+    required: true,
+    description: 'Payload de callback enviado pela Pontaltech (status update RCS)',
+    schema: {
+      type: 'object',
+      properties: {
+        messageId: { type: 'string', description: 'ID da mensagem na Pontaltech' },
+        status: { type: 'string', description: 'Status: DELIVERED, READ, FAILED, etc.' },
+        phone: { type: 'string', description: 'Telefone do destinatario' },
+        timestamp: { type: 'string', description: 'Timestamp do evento' },
+        errorCode: { type: 'string', description: 'Codigo de erro (se houver)' },
+        errorMessage: { type: 'string', description: 'Mensagem de erro (se houver)' },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Webhook RCS adicionado a fila',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        jobId: { type: 'string' },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 500,
+    description: 'Erro ao adicionar webhook RCS',
+    schema: {
+      type: 'object',
+      properties: { success: { type: 'boolean' }, error: { type: 'string' } },
+    },
+  })
+  async handleRcsWebhook(@Body() payload: RcsWebhookDto) {
+    this.logger.debug(
+      `Webhook RCS recebido: messageId=${payload.messageId}, status=${payload.status}`,
+    );
+
+    try {
+      const jobId = await this.webhookQueueService.addRcsWebhook(payload);
+
+      return {
+        success: true,
+        message: 'Webhook RCS adicionado a fila para processamento',
+        jobId,
+      };
+    } catch (error) {
+      this.logger.error(`Erro ao adicionar webhook RCS a fila: ${error.message}`);
       return {
         success: false,
         error: error.message,

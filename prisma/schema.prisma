@@ -278,6 +278,7 @@ model Message {
   
   // IDs do WhatsApp
   whatsappMessageId String?       @unique // ID retornado pela API do WhatsApp
+  providerMessageId String?       @unique // ID genérico retornado pelo provedor (WhatsApp, RCS, etc)
   wabaId            String?       // WhatsApp Business Account ID
   templateId        String?       // ID do template usado
   

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
 import { DiogenesWebhookDto } from './webhook.controller';
+import { RcsWebhookDto } from './rcs-webhook.dto';
 import { MessageStatus } from '@prisma/client';
 
 interface MetaStatusUpdate {
@@ -433,6 +434,178 @@ export class WebhookService {
     await this.updateCampaignCounters(message.campaignId, newStatus, previousStatus);
 
     this.logger.log(`Mensagem ${message.id} atualizada para status: ${newStatus}`);
+  }
+
+  /**
+   * Processa webhook de status RCS da Pontaltech
+   */
+  async processRcsWebhook(payload: RcsWebhookDto) {
+    const rcsMessageId = payload.messageId;
+    const rcsStatus = payload.status;
+    const recipientPhone = payload.phone;
+
+    if (!rcsMessageId && !recipientPhone) {
+      this.logger.warn('Webhook RCS recebido sem messageId nem phone - ignorando');
+      return;
+    }
+
+    // Busca a mensagem pelo providerMessageId (campo generico) ou externalId
+    let message: any = null;
+
+    if (rcsMessageId) {
+      message = await this.prisma.message.findFirst({
+        where: {
+          OR: [{ providerMessageId: rcsMessageId }, { externalId: rcsMessageId }],
+        },
+        include: {
+          campaign: true,
+          recipient: true,
+        },
+      });
+    }
+
+    // Fallback: busca pelo telefone do destinatario
+    if (!message && recipientPhone) {
+      message = await this.findMessageByPhone(recipientPhone);
+    }
+
+    if (!message) {
+      this.logger.warn(
+        `Mensagem RCS nao encontrada (messageId=${rcsMessageId}, phone=${recipientPhone}) - ignorando`,
+      );
+      return;
+    }
+
+    const newStatus = this.mapRcsStatusToMessageStatus(rcsStatus);
+    const previousStatus = message.status as MessageStatus | undefined;
+    const eventTimestamp = payload.timestamp
+      ? this.resolveMessageTimestamp(payload.timestamp)
+      : new Date();
+
+    // Salva o evento do webhook
+    const webhookEvent = await this.prisma.webhookEvent.create({
+      data: {
+        provider: 'pontaltech',
+        event: 'rcs_status',
+        eventType: payload.eventType || `status.${rcsStatus}`,
+        whatsappMessageId: rcsMessageId,
+        status: rcsStatus,
+        timestamp: eventTimestamp,
+        payload: payload as any,
+        processed: false,
+      },
+    });
+
+    this.logger.log(
+      `Webhook RCS recebido (campaign=${message.campaignId}, message=${message.id}, status=${rcsStatus})`,
+    );
+
+    // Atualiza a mensagem
+    const messageUpdate: any = {
+      status: newStatus,
+      metadata: {
+        ...(message.metadata as Record<string, unknown>),
+        lastWebhookStatus: rcsStatus,
+        lastWebhookEventId: webhookEvent.id,
+        lastWebhookAt: eventTimestamp,
+        lastWebhookProvider: 'pontaltech',
+        ...(payload.errorCode ? { lastWebhookErrorCode: payload.errorCode } : {}),
+        ...(payload.errorMessage ? { lastWebhookErrorMessage: payload.errorMessage } : {}),
+      },
+    };
+
+    if (newStatus === 'DELIVERED') {
+      messageUpdate.deliveredAt = eventTimestamp;
+    }
+
+    if (newStatus === 'READ') {
+      messageUpdate.readAt = eventTimestamp;
+    }
+
+    if (newStatus === 'FAILED') {
+      messageUpdate.failedAt = eventTimestamp;
+
+      if (payload.errorCode || payload.errorMessage) {
+        messageUpdate.errorCode = payload.errorCode ?? null;
+        messageUpdate.errorMessage = payload.errorMessage ?? null;
+        messageUpdate.errorDetails = {
+          provider: 'pontaltech',
+          errorCode: payload.errorCode,
+          errorMessage: payload.errorMessage,
+        } as any;
+      }
+    }
+
+    await this.prisma.message.update({
+      where: { id: message.id },
+      data: messageUpdate,
+    });
+
+    // Atualiza o destinatario
+    if (message.recipientId) {
+      const recipientUpdate: any = { status: newStatus };
+
+      if (newStatus === 'DELIVERED') {
+        recipientUpdate.deliveredAt = eventTimestamp;
+      }
+
+      if (newStatus === 'READ') {
+        recipientUpdate.readAt = eventTimestamp;
+      }
+
+      if (newStatus === 'FAILED') {
+        recipientUpdate.isActive = false;
+      }
+
+      await this.prisma.campaignRecipient.update({
+        where: { id: message.recipientId },
+        data: recipientUpdate,
+      });
+    }
+
+    // Atualiza contadores da campanha
+    await this.updateCampaignCounters(message.campaignId, newStatus, previousStatus);
+
+    // Marca o webhook como processado
+    try {
+      await this.prisma.webhookEvent.update({
+        where: { id: webhookEvent.id },
+        data: {
+          messageId: message.id,
+          processed: true,
+          processedAt: new Date(),
+        },
+      });
+    } catch (error) {
+      this.logger.debug(
+        `Nao foi possivel vincular webhookEvent ${webhookEvent.id} a mensagem ${message.id}: ${String(error)}`,
+      );
+    }
+
+    this.logger.debug(
+      `Status da mensagem RCS ${message.id}: ${previousStatus ?? 'unknown'} -> ${newStatus} (pontaltech=${rcsStatus})`,
+    );
+  }
+
+  /**
+   * Mapeia status da Pontaltech (RCS) para o enum MessageStatus interno
+   */
+  private mapRcsStatusToMessageStatus(rcsStatus?: string): MessageStatus {
+    if (!rcsStatus) return 'SENT';
+
+    const statusMap: Record<string, MessageStatus> = {
+      sent: 'SENT',
+      delivered: 'DELIVERED',
+      displayed: 'READ',
+      read: 'READ',
+      failed: 'FAILED',
+      error: 'FAILED',
+      expired: 'FAILED',
+      rejected: 'REJECTED',
+      undelivered: 'FAILED',
+    };
+
+    return statusMap[rcsStatus.toLowerCase()] || 'SENT';
   }
 
   /**

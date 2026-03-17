@@ -5,6 +5,7 @@ import {
   MetaWebhookJob,
   DiogenesWebhookJob,
   MetaMessageWebhookJob,
+  RcsWebhookJob,
 } from '../queues/webhook.processor';
 
 @Injectable()
@@ -101,6 +102,34 @@ export class WebhookQueueService {
 
     this.logger.debug(
       `📤 Mensagem Meta na fila - Job: ${job.id} - From: ${message?.from ?? 'unknown'}`,
+    );
+
+    return job.id || '';
+  }
+
+  /**
+   * Adiciona webhook RCS (Pontaltech) a fila
+   */
+  async addRcsWebhook(payload: RcsWebhookJob['payload']): Promise<string> {
+    const job = await this.webhookQueue.add(
+      'process-rcs-webhook',
+      {
+        type: 'rcs',
+        payload,
+      } as RcsWebhookJob,
+      {
+        attempts: 3,
+        backoff: {
+          type: 'exponential',
+          delay: 2000,
+        },
+        removeOnComplete: 100,
+        removeOnFail: 500,
+      },
+    );
+
+    this.logger.debug(
+      `Webhook RCS na fila - Job: ${job.id} - MessageId: ${payload.messageId ?? 'unknown'}`,
     );
 
     return job.id || '';

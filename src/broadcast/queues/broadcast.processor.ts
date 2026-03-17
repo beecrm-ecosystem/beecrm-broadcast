@@ -3,7 +3,7 @@ import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 import { MessageStatus } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
-import { DiogenesService } from '../services/diogenes.service';
+import { ChannelDispatcherFactory } from '../services/channel-dispatcher.factory';
 import {
   CampaignWebhookService,
   BroadcastMessageSummary,
@@ -49,7 +49,7 @@ export class BroadcastProcessor extends WorkerHost {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly diogenesService: DiogenesService,
+    private readonly dispatcherFactory: ChannelDispatcherFactory,
     private readonly campaignWebhookService: CampaignWebhookService,
     @InjectQueue('broadcast-dlq') private readonly dlq: Queue<DeadLetterJob>,
   ) {
@@ -74,19 +74,11 @@ export class BroadcastProcessor extends WorkerHost {
     );
 
     try {
-      // Monta os componentes do template
-      const components = this.diogenesService.buildTemplateComponents(
-        templateData,
-        recipientVariables,
-      );
+      // Obtém o dispatcher adequado para o canal
+      const dispatcher = this.dispatcherFactory.getDispatcher(channel);
 
-      // Envia via Diogenes
-      const response = await this.diogenesService.sendTemplate(channel, {
-        number: recipientPhone,
-        name: templateName,
-        language: templateLanguage,
-        components,
-      });
+      // Envia via dispatcher (WhatsApp → Diogenes, RCS → Pontaltech)
+      const result = await dispatcher.sendMessage(job.data);
 
       // Salva a mensagem no banco com o ID retornado
       const message = await this.prisma.message.create({
@@ -94,17 +86,11 @@ export class BroadcastProcessor extends WorkerHost {
           campaignId,
           recipientId,
           templateId: templateData.id || templateName,
-          externalId: response.key.id, // ID do WhatsApp
+          externalId: result.externalId,
           phoneNumber: recipientPhone,
           status: 'SENT',
           sentAt: new Date(),
-          metadata: {
-            remoteJid: response.key.remoteJid,
-            messageType: response.messageType,
-            messageTimestamp: response.messageTimestamp,
-            instanceId: response.instanceId,
-            diogenes_status: response.status,
-          },
+          metadata: result.metadata || {},
         },
       });
 
@@ -132,13 +118,13 @@ export class BroadcastProcessor extends WorkerHost {
       await this.checkAndCompleteCampaign(campaignId);
 
       this.logger.log(
-        `Mensagem enviada com sucesso! ID: ${message.id} | External ID: ${response.key.id}`,
+        `Mensagem enviada com sucesso! ID: ${message.id} | External ID: ${result.externalId}`,
       );
 
       return {
         success: true,
         messageId: message.id,
-        externalId: response.key.id,
+        externalId: result.externalId,
       };
     } catch (error) {
       this.logger.error(`Erro ao processar envio para ${recipientPhone}: ${error.message}`);

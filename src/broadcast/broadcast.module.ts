@@ -28,6 +28,9 @@ import { CampaignSchedulerService } from './services/campaign-scheduler.service'
 import { CampaignSchedulerProcessor } from './queues/campaign-scheduler.processor';
 import { CampaignMonitorService } from './services/campaign-monitor.service';
 import { CampaignMonitorProcessor } from './queues/campaign-monitor.processor';
+import { WhatsAppDispatcher } from './services/dispatchers/whatsapp.dispatcher';
+import { RcsDispatcher } from './services/dispatchers/rcs.dispatcher';
+import { ChannelDispatcherFactory } from './services/channel-dispatcher.factory';
 
 @Module({
   imports: [
@@ -55,7 +58,7 @@ import { CampaignMonitorProcessor } from './queues/campaign-monitor.processor';
     BullModule.registerQueue({
       name: 'webhook-queue',
     }),
-    // HTTP para chamadas ao Diogenes
+    // HTTP para chamadas ao Diogenes e Pontaltech (RCS)
     HttpModule.register({
       timeout: 30000,
       maxRedirects: 5,
@@ -91,6 +94,9 @@ import { CampaignMonitorProcessor } from './queues/campaign-monitor.processor';
     CampaignSchedulerProcessor,
     CampaignMonitorService,
     CampaignMonitorProcessor,
+    WhatsAppDispatcher,
+    RcsDispatcher,
+    ChannelDispatcherFactory,
   ],
   exports: [BroadcastService, QueueService, ImportService, MetricsService, WebhookQueueService],
 })

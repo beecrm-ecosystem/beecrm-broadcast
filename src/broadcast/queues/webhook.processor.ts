@@ -76,7 +76,23 @@ export interface DiogenesWebhookJob {
   };
 }
 
-export type WebhookJob = MetaWebhookJob | MetaMessageWebhookJob | DiogenesWebhookJob;
+export interface RcsWebhookJob {
+  type: 'rcs';
+  payload: {
+    messageId?: string;
+    status?: string;
+    phone?: string;
+    timestamp?: string;
+    errorCode?: string;
+    errorMessage?: string;
+    provider?: string;
+    agentId?: string;
+    eventType?: string;
+    [key: string]: any;
+  };
+}
+
+export type WebhookJob = MetaWebhookJob | MetaMessageWebhookJob | DiogenesWebhookJob | RcsWebhookJob;
 
 @Processor('webhook-queue', {
   concurrency: 5, // Processa até 5 webhooks simultaneamente
@@ -160,6 +176,28 @@ export class WebhookProcessor extends WorkerHost {
           success: true,
           type: 'diogenes',
           event: jobData.payload.event,
+        };
+      } else if (jobData.type === 'rcs') {
+        this.fileLogger.logWebhook({
+          timestamp: new Date().toISOString(),
+          type: 'rcs',
+          messageId: jobData.payload.messageId || 'unknown',
+          status: jobData.payload.status || 'unknown',
+          recipient: jobData.payload.phone || 'unknown',
+          payload: jobData.payload,
+        });
+
+        await this.webhookService.processRcsWebhook(jobData.payload);
+
+        this.logger.debug(
+          `✅ Webhook RCS processado - ${jobData.payload.messageId} (${jobData.payload.status})`,
+        );
+
+        return {
+          success: true,
+          type: 'rcs',
+          messageId: jobData.payload.messageId,
+          status: jobData.payload.status,
         };
       }
 

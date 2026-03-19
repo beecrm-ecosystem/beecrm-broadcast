@@ -76,6 +76,13 @@ export class CreateCampaignDto {
   @IsOptional()
   tags?: string[];
 
+  @Transform(({ value }) => {
+    if (typeof value === 'string') {
+      try { return JSON.parse(value); } catch { return {}; }
+    }
+    if (Array.isArray(value) && value.length === 0) return {};
+    return value;
+  })
   @IsObject()
   @IsOptional()
   metadata?: any;

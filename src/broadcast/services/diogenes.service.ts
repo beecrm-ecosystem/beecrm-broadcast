@@ -356,7 +356,7 @@ export class DiogenesService {
 
   private getVariableValue(key: string, variables: Record<string, any>): string {
     if (!variables || typeof variables !== 'object') {
-      return '';
+      return '-';
     }
 
     const normalizedKey = key.toString();
@@ -380,15 +380,16 @@ export class DiogenesService {
       }
     }
 
-    return '';
+    return '-';
   }
 
   private normalizeVariableValue(value: any): string {
     if (value === null || value === undefined) {
-      return '';
+      return '-';
     }
 
-    return String(value);
+    const str = String(value).trim();
+    return str || '-';
   }
 
   private isCircuitOpen(): boolean {

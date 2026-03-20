@@ -69,6 +69,17 @@ export class BroadcastProcessor extends WorkerHost {
       templateLanguage,
     } = job.data;
 
+    // Verificar time window antes de processar
+    const timeWindowCheck = await this.checkTimeWindow(campaignId, templateData?.name || templateName);
+    if (timeWindowCheck.outsideWindow) {
+      this.logger.log(
+        `⏰ Fora da janela ${timeWindowCheck.window?.startTime}-${timeWindowCheck.window?.endTime}. `
+        + `Reagendando em ${Math.round((timeWindowCheck.delayMs || 0) / 60000)}min`,
+      );
+      await job.moveToDelayed(Date.now() + (timeWindowCheck.delayMs || 60000));
+      return { success: false, reason: 'outside_time_window', rescheduled: true };
+    }
+
     this.logger.log(
       `Processando envio para ${recipientName} (${recipientPhone}) - Campanha: ${campaignId}`,
     );
@@ -390,6 +401,77 @@ export class BroadcastProcessor extends WorkerHost {
         failedCount: { increment: failedDelta },
       },
     });
+  }
+
+  /**
+   * Verifica se o horário atual está dentro da janela de envio do template.
+   * Se fora da janela, calcula o delay até o próximo startTime.
+   */
+  private async checkTimeWindow(
+    campaignId: string,
+    templateName: string,
+  ): Promise<{ outsideWindow: boolean; delayMs?: number; window?: { startTime: string; endTime: string } }> {
+    try {
+      const campaign = await this.prisma.campaign.findUnique({
+        where: { id: campaignId },
+        select: { timeWindows: true },
+      });
+
+      const timeWindows = (campaign?.timeWindows as any[]) || [];
+      if (!timeWindows || timeWindows.length === 0) {
+        return { outsideWindow: false };
+      }
+
+      // Encontra a janela do template ou usa a primeira como fallback
+      const window = timeWindows.find(
+        (w: any) => w.templateName === templateName,
+      ) || timeWindows[0];
+
+      if (!window || !window.startTime || !window.endTime) {
+        return { outsideWindow: false };
+      }
+
+      const now = new Date();
+      const currentMinutes = now.getHours() * 60 + now.getMinutes();
+      const [startH, startM] = window.startTime.split(':').map(Number);
+      const [endH, endM] = window.endTime.split(':').map(Number);
+      const startMinutes = startH * 60 + startM;
+      const endMinutes = endH * 60 + endM;
+
+      // Suporte a janelas overnight (ex: 22:00-06:00)
+      const isOvernight = endMinutes <= startMinutes;
+      let isInside: boolean;
+
+      if (isOvernight) {
+        // Janela cruza meia-noite: dentro se >= start OU < end
+        isInside = currentMinutes >= startMinutes || currentMinutes < endMinutes;
+      } else {
+        // Janela normal: dentro se >= start E < end
+        isInside = currentMinutes >= startMinutes && currentMinutes < endMinutes;
+      }
+
+      if (isInside) {
+        return { outsideWindow: false };
+      }
+
+      // Fora da janela — calcular delay até o próximo startTime
+      let delayMs: number;
+      if (currentMinutes >= startMinutes) {
+        // Já passou do start (e do end também) — agendar para amanhã no startTime
+        delayMs = ((24 * 60 - currentMinutes) + startMinutes) * 60000;
+      } else {
+        // Antes do início — agendar para hoje no startTime
+        delayMs = (startMinutes - currentMinutes) * 60000;
+      }
+
+      // Safety: mínimo 1min delay para evitar loop agressivo
+      delayMs = Math.max(delayMs, 60000);
+
+      return { outsideWindow: true, delayMs, window };
+    } catch (error) {
+      this.logger.warn(`Erro ao verificar time window: ${error instanceof Error ? error.message : String(error)}`);
+      return { outsideWindow: false };
+    }
   }
 
   private async pushToDlq(job: {

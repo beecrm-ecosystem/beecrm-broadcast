@@ -196,6 +196,9 @@ model Campaign {
   optOutCount       Int           @default(0)
   lastResponseAt    DateTime?
   
+  // Janelas de horário por template
+  timeWindows     Json?           @default("[]") @map("time_windows")
+
   // Metadados
   tags            String[]
   metadata        Json?           // Dados adicionais customizados

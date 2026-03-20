@@ -68,8 +68,17 @@ export class CreateCampaignDto {
 
   @IsNumber()
   @IsOptional()
-  @Min(1000)
+  @Min(0)
   delayBetweenBatches?: number;
+
+  @IsArray()
+  @IsOptional()
+  timeWindows?: Array<{
+    templateName: string;
+    category: string;
+    startTime: string;
+    endTime: string;
+  }>;
 
   @IsArray()
   @IsString({ each: true })
@@ -110,12 +119,11 @@ export class UpdateCampaignDto {
   @IsNumber()
   @IsOptional()
   @Min(1)
-  @Max(1000)
   batchSize?: number;
 
   @IsNumber()
   @IsOptional()
-  @Min(1000)
+  @Min(0)
   delayBetweenBatches?: number;
 
   @IsArray()

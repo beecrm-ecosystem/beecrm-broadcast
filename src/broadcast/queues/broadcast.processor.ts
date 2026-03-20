@@ -70,11 +70,14 @@ export class BroadcastProcessor extends WorkerHost {
     } = job.data;
 
     // Verificar time window antes de processar
-    const timeWindowCheck = await this.checkTimeWindow(campaignId, templateData?.name || templateName);
+    const timeWindowCheck = await this.checkTimeWindow(
+      campaignId,
+      templateData?.name || templateName,
+    );
     if (timeWindowCheck.outsideWindow) {
       this.logger.log(
-        `⏰ Fora da janela ${timeWindowCheck.window?.startTime}-${timeWindowCheck.window?.endTime}. `
-        + `Reagendando em ${Math.round((timeWindowCheck.delayMs || 0) / 60000)}min`,
+        `⏰ Fora da janela ${timeWindowCheck.window?.startTime}-${timeWindowCheck.window?.endTime}. ` +
+          `Reagendando em ${Math.round((timeWindowCheck.delayMs || 0) / 60000)}min`,
       );
       await job.moveToDelayed(Date.now() + (timeWindowCheck.delayMs || 60000));
       return { success: false, reason: 'outside_time_window', rescheduled: true };
@@ -410,7 +413,11 @@ export class BroadcastProcessor extends WorkerHost {
   private async checkTimeWindow(
     campaignId: string,
     templateName: string,
-  ): Promise<{ outsideWindow: boolean; delayMs?: number; window?: { startTime: string; endTime: string } }> {
+  ): Promise<{
+    outsideWindow: boolean;
+    delayMs?: number;
+    window?: { startTime: string; endTime: string };
+  }> {
     try {
       const campaign = await this.prisma.campaign.findUnique({
         where: { id: campaignId },
@@ -423,16 +430,20 @@ export class BroadcastProcessor extends WorkerHost {
       }
 
       // Encontra a janela do template ou usa a primeira como fallback
-      const window = timeWindows.find(
-        (w: any) => w.templateName === templateName,
-      ) || timeWindows[0];
+      const window =
+        timeWindows.find((w: any) => w.templateName === templateName) || timeWindows[0];
 
       if (!window || !window.startTime || !window.endTime) {
         return { outsideWindow: false };
       }
 
+      // Usa timezone da janela (default: America/Sao_Paulo)
+      const tz = window.timezone || 'America/Sao_Paulo';
       const now = new Date();
-      const currentMinutes = now.getHours() * 60 + now.getMinutes();
+      const localTime = new Date(
+        now.toLocaleString('en-US', { timeZone: tz }),
+      );
+      const currentMinutes = localTime.getHours() * 60 + localTime.getMinutes();
       const [startH, startM] = window.startTime.split(':').map(Number);
       const [endH, endM] = window.endTime.split(':').map(Number);
       const startMinutes = startH * 60 + startM;
@@ -450,6 +461,13 @@ export class BroadcastProcessor extends WorkerHost {
         isInside = currentMinutes >= startMinutes && currentMinutes < endMinutes;
       }
 
+      this.logger.debug(
+        `⏰ TimeWindow check: template=${templateName}, tz=${tz}, ` +
+        `now=${localTime.getHours()}:${String(localTime.getMinutes()).padStart(2,'0')} (${currentMinutes}min), ` +
+        `window=${window.startTime}-${window.endTime} (${startMinutes}-${endMinutes}min), ` +
+        `overnight=${isOvernight}, inside=${isInside}`,
+      );
+
       if (isInside) {
         return { outsideWindow: false };
       }
@@ -458,7 +476,7 @@ export class BroadcastProcessor extends WorkerHost {
       let delayMs: number;
       if (currentMinutes >= startMinutes) {
         // Já passou do start (e do end também) — agendar para amanhã no startTime
-        delayMs = ((24 * 60 - currentMinutes) + startMinutes) * 60000;
+        delayMs = (24 * 60 - currentMinutes + startMinutes) * 60000;
       } else {
         // Antes do início — agendar para hoje no startTime
         delayMs = (startMinutes - currentMinutes) * 60000;
@@ -469,7 +487,9 @@ export class BroadcastProcessor extends WorkerHost {
 
       return { outsideWindow: true, delayMs, window };
     } catch (error) {
-      this.logger.warn(`Erro ao verificar time window: ${error instanceof Error ? error.message : String(error)}`);
+      this.logger.warn(
+        `Erro ao verificar time window: ${error instanceof Error ? error.message : String(error)}`,
+      );
       return { outsideWindow: false };
     }
   }

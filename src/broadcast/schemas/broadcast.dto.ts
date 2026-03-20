@@ -78,6 +78,7 @@ export class CreateCampaignDto {
     category: string;
     startTime: string;
     endTime: string;
+    timezone?: string;
   }>;
 
   @IsArray()

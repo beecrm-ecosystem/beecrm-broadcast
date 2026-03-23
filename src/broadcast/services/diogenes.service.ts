@@ -222,16 +222,9 @@ export class DiogenesService {
             type: 'body',
             parameters: bodyParams.map((text) => ({ type: 'text', text })),
           });
-        } else if (rawComponent.text) {
-          components.push(
-            this.decorateComponent('body', [
-              {
-                type: 'text',
-                text: this.resolveTemplateText(rawComponent.text, recipientVariables),
-              },
-            ]),
-          );
         }
+        // Se não há variáveis ({{1}}, {{2}}, etc.), não envia componente body —
+        // o Meta rejeita com erro 132000 se enviar parâmetros para template sem variáveis.
         continue;
       }
 

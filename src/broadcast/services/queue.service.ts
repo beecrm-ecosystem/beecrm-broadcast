@@ -80,7 +80,7 @@ export class QueueService {
 
     this.logger.log(`Enfileirando ${recipients.length} destinatários da campanha ${campaign.name}`);
 
-    const templateData = campaign.templateData as any;
+    const campaignTemplateData = campaign.templateData as any;
     const batchSize = Math.max(1, campaign.batchSize || 1);
     const delayBetweenBatches = Math.max(0, campaign.delayBetweenBatches ?? 0);
 
@@ -88,6 +88,11 @@ export class QueueService {
     const jobs = recipients.map((recipient, index) => {
       const batchNumber = Math.floor(index / batchSize);
       const delay = batchNumber * delayBetweenBatches;
+
+      // Per-recipient template override (used by rotation campaigns)
+      const recipientMeta = recipient.metadata as Record<string, any> | null;
+      const templateOverride = recipientMeta?.templateOverride ?? null;
+      const templateData = templateOverride || campaignTemplateData;
 
       const jobData: SendMessageJob = {
         campaignId: campaign.id,

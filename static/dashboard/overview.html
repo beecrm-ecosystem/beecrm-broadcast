@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Overview - BeeCRM Broadcast</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-content">
+            <h1>BeeCRM Broadcast</h1>
+            <div class="nav-links">
+                <a href="overview.html" class="nav-link active">Overview</a>
+                <a href="campaigns.html" class="nav-link">Campanhas</a>
+            </div>
+            <div class="nav-actions">
+                <span id="userInfo" class="user-info"></span>
+                <button onclick="logout()" class="btn-secondary btn-sm">Sair</button>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container">
+        <div class="page-header">
+            <h2>Overview</h2>
+            <div class="header-actions">
+                <span id="lastUpdated" class="text-muted"></span>
+                <button onclick="loadOverview()" class="btn-secondary btn-sm">Atualizar</button>
+            </div>
+        </div>
+
+        <!-- KPI Cards -->
+        <div class="overview-kpis" id="kpiCards">
+            <div class="kpi-card">
+                <div class="kpi-icon kpi-icon--total">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                </div>
+                <div class="kpi-content">
+                    <span class="kpi-label">Total Campanhas</span>
+                    <span class="kpi-value" id="kpiTotal">--</span>
+                </div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-icon kpi-icon--sent">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                </div>
+                <div class="kpi-content">
+                    <span class="kpi-label">Mensagens Enviadas</span>
+                    <span class="kpi-value" id="kpiSent">--</span>
+                </div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-icon kpi-icon--delivered">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+                </div>
+                <div class="kpi-content">
+                    <span class="kpi-label">Entregues</span>
+                    <span class="kpi-value" id="kpiDelivered">--</span>
+                    <span class="kpi-sub" id="kpiDeliveredRate">--</span>
+                </div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-icon kpi-icon--read">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                </div>
+                <div class="kpi-content">
+                    <span class="kpi-label">Lidas</span>
+                    <span class="kpi-value" id="kpiRead">--</span>
+                    <span class="kpi-sub" id="kpiReadRate">--</span>
+                </div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-icon kpi-icon--failed">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                </div>
+                <div class="kpi-content">
+                    <span class="kpi-label">Falhas</span>
+                    <span class="kpi-value" id="kpiFailed">--</span>
+                    <span class="kpi-sub" id="kpiFailedRate">--</span>
+                </div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-icon kpi-icon--response">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                </div>
+                <div class="kpi-content">
+                    <span class="kpi-label">Respostas</span>
+                    <span class="kpi-value" id="kpiResponses">--</span>
+                    <span class="kpi-sub" id="kpiResponseRate">--</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Status Distribution + Active Campaigns -->
+        <div class="overview-grid">
+            <div class="card">
+                <h3>Campanhas por Status</h3>
+                <div id="statusDistribution" class="status-dist-grid"></div>
+            </div>
+            <div class="card">
+                <h3>Campanhas Ativas</h3>
+                <div id="activeCampaigns"></div>
+            </div>
+        </div>
+
+        <!-- Queue Health -->
+        <div class="card">
+            <h3>Saude das Filas</h3>
+            <div id="queueHealth" class="queue-health-grid"></div>
+        </div>
+    </div>
+
+    <script src="js/auth.js"></script>
+    <script src="js/overview.js"></script>
+</body>
+</html>

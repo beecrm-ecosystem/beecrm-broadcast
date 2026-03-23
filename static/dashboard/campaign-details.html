@@ -9,10 +9,14 @@
 <body>
     <nav class="navbar">
         <div class="nav-content">
-            <h1>🐝 BeeCRM Broadcast</h1>
+            <h1>BeeCRM Broadcast</h1>
+            <div class="nav-links">
+                <a href="overview.html" class="nav-link">Overview</a>
+                <a href="campaigns.html" class="nav-link">Campanhas</a>
+            </div>
             <div class="nav-actions">
-                <a href="campaigns.html" class="btn-secondary">← Voltar</a>
-                <button onclick="logout()" class="btn-secondary">Sair</button>
+                <a href="campaigns.html" class="btn-secondary btn-sm">Voltar</a>
+                <button onclick="logout()" class="btn-secondary btn-sm">Sair</button>
             </div>
         </div>
     </nav>
@@ -23,19 +27,20 @@
         <div class="stats-grid" id="statsGrid"></div>
 
         <div class="tabs">
-            <button class="tab-button active" onclick="showTab('overview')">Visão Geral</button>
-            <button class="tab-button" onclick="showTab('recipients')">Destinatários</button>
-            <button class="tab-button" onclick="showTab('errors')">Análise de Erros</button>
+            <button class="tab-button active" onclick="showTab('overview')">Visao Geral</button>
+            <button class="tab-button" onclick="showTab('recipients')">Destinatarios</button>
+            <button class="tab-button" onclick="showTab('errors')">Erros</button>
             <button class="tab-button" onclick="showTab('engagement')">Engajamento</button>
+            <button class="tab-button" onclick="showTab('responses')">Respostas</button>
         </div>
 
         <div id="overview" class="tab-content active">
             <div class="card">
-                <h3>Taxa de Sucesso</h3>
+                <h3>Taxas de Performance</h3>
                 <div id="ratesChart" class="chart-container"></div>
             </div>
             <div class="card">
-                <h3>Distribuição de Status</h3>
+                <h3>Distribuicao de Status</h3>
                 <div id="statusDistribution"></div>
             </div>
         </div>
@@ -43,9 +48,9 @@
         <div id="recipients" class="tab-content">
             <div class="card">
                 <div class="card-header">
-                    <h3>Destinatários</h3>
+                    <h3>Destinatarios</h3>
                     <div class="header-actions">
-                        <button onclick="exportRecipients()" class="btn-primary" style="padding: 8px 16px; font-size: 0.9rem;">📥 Exportar CSV</button>
+                        <button onclick="exportRecipients()" class="btn-primary btn-sm">Exportar CSV</button>
                         <input type="text" id="recipientSearch" placeholder="Buscar..." class="search-input-small">
                         <select id="recipientStatusFilter" class="filter-select-small">
                             <option value="">Todos</option>
@@ -60,16 +65,16 @@
                 </div>
                 <div id="recipientsTable"></div>
                 <div class="pagination">
-                    <button id="prevPageRecipients" onclick="previousPageRecipients()" class="btn-secondary">← Anterior</button>
+                    <button id="prevPageRecipients" onclick="previousPageRecipients()" class="btn-secondary btn-sm">Anterior</button>
                     <span id="pageInfoRecipients"></span>
-                    <button id="nextPageRecipients" onclick="nextPageRecipients()" class="btn-secondary">Próxima →</button>
+                    <button id="nextPageRecipients" onclick="nextPageRecipients()" class="btn-secondary btn-sm">Proxima</button>
                 </div>
             </div>
         </div>
 
         <div id="errors" class="tab-content">
             <div class="card">
-                <h3>Análise de Erros</h3>
+                <h3>Analise de Erros</h3>
                 <div id="errorsAnalysis"></div>
             </div>
         </div>
@@ -80,16 +85,27 @@
                 <div id="hourlyEngagement"></div>
             </div>
             <div class="card">
-                <h3>Melhores Horários</h3>
+                <h3>Melhores Horarios</h3>
                 <div id="bestHours"></div>
             </div>
         </div>
 
+        <div id="responses" class="tab-content">
+            <div class="card">
+                <h3>Respostas Recebidas</h3>
+                <div id="responsesContent"></div>
+            </div>
+        </div>
+
         <div id="actions" class="campaign-actions">
-            <button id="requeueBtn" onclick="requeueCampaign()" class="btn-warning">🔄 Reenfileirar</button>
-            <button id="pauseBtn" onclick="pauseCampaign()" class="btn-secondary">⏸️ Pausar</button>
-            <button id="resumeBtn" onclick="resumeCampaign()" class="btn-primary">▶️ Retomar</button>
-            <button id="cancelBtn" onclick="cancelCampaign()" class="btn-danger">❌ Cancelar</button>
+            <button id="requeueBtn" onclick="requeueCampaign()" class="btn-warning btn-sm">Reenfileirar</button>
+            <button id="pauseBtn" onclick="pauseCampaign()" class="btn-secondary btn-sm">Pausar</button>
+            <button id="resumeBtn" onclick="resumeCampaign()" class="btn-primary btn-sm">Retomar</button>
+            <button id="cancelBtn" onclick="cancelCampaign()" class="btn-danger btn-sm">Cancelar</button>
+        </div>
+
+        <div id="autoRefreshIndicator" class="auto-refresh-indicator" style="display:none">
+            Auto-refresh ativo
         </div>
     </div>
 

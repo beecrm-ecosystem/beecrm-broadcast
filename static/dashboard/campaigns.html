@@ -9,10 +9,14 @@
 <body>
     <nav class="navbar">
         <div class="nav-content">
-            <h1>🐝 BeeCRM Broadcast</h1>
+            <h1>BeeCRM Broadcast</h1>
+            <div class="nav-links">
+                <a href="overview.html" class="nav-link">Overview</a>
+                <a href="campaigns.html" class="nav-link active">Campanhas</a>
+            </div>
             <div class="nav-actions">
                 <span id="userInfo" class="user-info"></span>
-                <button onclick="logout()" class="btn-secondary">Sair</button>
+                <button onclick="logout()" class="btn-secondary btn-sm">Sair</button>
             </div>
         </div>
     </nav>
@@ -21,7 +25,7 @@
         <div class="page-header">
             <h2>Campanhas</h2>
             <div class="header-actions">
-                <button onclick="refreshCampaigns()" class="btn-secondary">🔄 Atualizar</button>
+                <button onclick="refreshCampaigns()" class="btn-secondary btn-sm">Atualizar</button>
             </div>
         </div>
 
@@ -32,21 +36,26 @@
                 <option value="DRAFT">Rascunho</option>
                 <option value="SCHEDULED">Agendada</option>
                 <option value="PROCESSING">Em Processamento</option>
-                <option value="COMPLETED">Concluída</option>
+                <option value="COMPLETED">Concluida</option>
                 <option value="PAUSED">Pausada</option>
                 <option value="CANCELED">Cancelada</option>
                 <option value="FAILED">Falha</option>
+            </select>
+            <select id="channelFilter" class="filter-select" style="min-width:140px">
+                <option value="">Todos os Canais</option>
+                <option value="whatsapp">WhatsApp</option>
+                <option value="rcs">RCS</option>
             </select>
         </div>
 
         <div id="campaignsContainer" class="campaigns-grid"></div>
         <div id="loadingSpinner" class="loading-spinner">Carregando...</div>
         <div id="errorContainer" class="error-container"></div>
-        
+
         <div class="pagination">
-            <button id="prevPage" onclick="previousPage()" class="btn-secondary">← Anterior</button>
+            <button id="prevPage" onclick="previousPage()" class="btn-secondary btn-sm">Anterior</button>
             <span id="pageInfo" class="page-info"></span>
-            <button id="nextPage" onclick="nextPage()" class="btn-secondary">Próxima →</button>
+            <button id="nextPage" onclick="nextPage()" class="btn-secondary btn-sm">Proxima</button>
         </div>
     </div>
 

@@ -27,7 +27,7 @@ document.getElementById('loginForm')?.addEventListener('submit', async (e) => {
     if (password === 'beecrm2024' || password === 'admin') {
         localStorage.setItem('broadcast_token', btoa(username + ':' + password));
         localStorage.setItem('broadcast_username', username);
-        window.location.href = '/dashboard/campaigns.html';
+        window.location.href = '/dashboard/overview.html';
     } else {
         errorMessage.textContent = 'Credenciais inválidas';
         errorMessage.classList.add('active');

@@ -31,6 +31,15 @@ interface BroadcastSummarySnapshot {
   failedContacts: number;
 }
 
+export interface MessageResultItem {
+  phoneNumber: string;
+  name: string | null;
+  externalId: string | null;
+  status: string;
+  sentAt: string | null;
+  errorMessage: string | null;
+}
+
 export interface BroadcastMessageSummary {
   recipientId: string;
   phoneNumber: string;
@@ -188,6 +197,33 @@ export class CampaignWebhookService {
     }
     this.logger.debug(`Payload do webhook: ${JSON.stringify(payload, null, 2)}`);
     await this.executeRequest(baseUrl, token || '', payload, 'broadcast:statusUpdate');
+  }
+
+  async sendMessageResults(
+    campaign: Campaign,
+    messages: MessageResultItem[],
+  ): Promise<void> {
+    const baseUrl = this.resolveBaseUrl(campaign.channel);
+    if (!baseUrl) {
+      return;
+    }
+
+    const token = this.resolveToken();
+    const broadcastId = this.resolveBroadcastId(campaign);
+
+    const payload = {
+      event: 'broadcast:messageResults',
+      data: {
+        broadcastId,
+        messages,
+      },
+    };
+
+    this.logger.log(
+      `📤 Enviando webhook broadcast:messageResults (campaign=${campaign.id}, messages=${messages.length})`,
+    );
+    this.logger.debug(`Payload do webhook: ${JSON.stringify(payload, null, 2)}`);
+    await this.executeRequest(baseUrl, token || '', payload, 'broadcast:messageResults');
   }
 
   private async executeRequest(baseUrl: string, token: string, payload: any, eventName: string) {

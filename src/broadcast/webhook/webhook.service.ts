@@ -149,66 +149,81 @@ export class WebhookService {
     webhookEventId: string,
   ) {
     const newStatus = this.mapMetaStatusToMessageStatus(metaStatus);
-    const previousStatus = message.status as MessageStatus | undefined;
     const eventTimestamp = this.resolveMessageTimestamp(statusPayload?.timestamp);
 
-    const messageUpdate: any = {
-      status: newStatus,
-      metadata: {
-        ...(message.metadata as Record<string, unknown>),
-        lastWebhookStatus: metaStatus,
-        lastWebhookEventId: webhookEventId,
-        lastWebhookAt: eventTimestamp,
-        lastWebhookErrors: statusPayload.errors ?? [],
-      },
-    };
+    // Usa transaction para evitar race condition em webhooks simultâneos
+    await this.prisma.$transaction(async (tx) => {
+      // Re-lê a mensagem dentro da transaction para pegar o status mais recente
+      const freshMessage = await tx.message.findUnique({
+        where: { id: message.id },
+      });
 
-    if (newStatus === 'DELIVERED') {
-      messageUpdate.deliveredAt = eventTimestamp;
-    }
+      if (!freshMessage) return;
 
-    if (newStatus === 'READ') {
-      messageUpdate.readAt = eventTimestamp;
-    }
+      const previousStatus = freshMessage.status as MessageStatus | undefined;
 
-    if (newStatus === 'FAILED') {
-      messageUpdate.failedAt = eventTimestamp;
+      // Guard: ignora se o status é o mesmo
+      if (previousStatus === newStatus) return;
 
-      if (statusPayload.errors?.length) {
-        const [firstError] = statusPayload.errors;
-        messageUpdate.errorCode = String(firstError.code ?? '');
-        messageUpdate.errorMessage = firstError.message ?? firstError.title ?? null;
-        messageUpdate.errorDetails = statusPayload.errors as any;
-      }
-    }
-
-    await this.prisma.message.update({
-      where: { id: message.id },
-      data: messageUpdate,
-    });
-
-    if (message.recipientId) {
-      const recipientUpdate: any = { status: newStatus };
+      const messageUpdate: any = {
+        status: newStatus,
+        metadata: {
+          ...(freshMessage.metadata as Record<string, unknown>),
+          lastWebhookStatus: metaStatus,
+          lastWebhookEventId: webhookEventId,
+          lastWebhookAt: eventTimestamp,
+          lastWebhookErrors: statusPayload.errors ?? [],
+        },
+      };
 
       if (newStatus === 'DELIVERED') {
-        recipientUpdate.deliveredAt = eventTimestamp;
+        messageUpdate.deliveredAt = eventTimestamp;
       }
 
       if (newStatus === 'READ') {
-        recipientUpdate.readAt = eventTimestamp;
+        messageUpdate.readAt = eventTimestamp;
       }
 
       if (newStatus === 'FAILED') {
-        recipientUpdate.isActive = false;
+        messageUpdate.failedAt = eventTimestamp;
+
+        if (statusPayload.errors?.length) {
+          const [firstError] = statusPayload.errors;
+          messageUpdate.errorCode = String(firstError.code ?? '');
+          messageUpdate.errorMessage = firstError.message ?? firstError.title ?? null;
+          messageUpdate.errorDetails = statusPayload.errors as any;
+        }
       }
 
-      await this.prisma.campaignRecipient.update({
-        where: { id: message.recipientId },
-        data: recipientUpdate,
+      await tx.message.update({
+        where: { id: freshMessage.id },
+        data: messageUpdate,
       });
-    }
 
-    await this.updateCampaignCounters(message.campaignId, newStatus, previousStatus);
+      if (message.recipientId) {
+        const recipientUpdate: any = { status: newStatus };
+
+        if (newStatus === 'DELIVERED') {
+          recipientUpdate.deliveredAt = eventTimestamp;
+        }
+
+        if (newStatus === 'READ') {
+          recipientUpdate.readAt = eventTimestamp;
+        }
+
+        if (newStatus === 'FAILED') {
+          recipientUpdate.isActive = false;
+        }
+
+        await tx.campaignRecipient.update({
+          where: { id: message.recipientId },
+          data: recipientUpdate,
+        });
+      }
+
+      // Atualiza contadores fora da transaction (usa increment atômico)
+      await this.updateCampaignCounters(message.campaignId, newStatus, previousStatus);
+    });
 
     try {
       await this.prisma.webhookEvent.update({
@@ -226,7 +241,7 @@ export class WebhookService {
     }
 
     this.logger.debug(
-      `Status da mensagem ${message.id}: ${previousStatus ?? 'unknown'} → ${newStatus} (meta=${metaStatus})`,
+      `Status da mensagem ${message.id} atualizado → ${newStatus} (meta=${metaStatus})`,
     );
   }
 
@@ -644,10 +659,12 @@ export class WebhookService {
   }
 
   /**
-   * Atualiza contadores da campanha baseado no novo status
+   * Atualiza contadores da campanha baseado no novo status.
    *
-   * IMPORTANTE: sentCount e failedCount são contadores FINAIS que nunca decrementam
-   * deliveredCount e readCount são métricas adicionais que podem sobrepor
+   * Contadores são EXCLUSIVOS: cada mensagem está em exatamente um bucket.
+   * sentCount + failedCount + pendingCount = totalRecipients (invariante).
+   * deliveredCount e readCount são sub-métricas dentro de sentCount.
+   * Quando uma mensagem muda de SENT → FAILED, sentCount decrementa e failedCount incrementa.
    */
   private async updateCampaignCounters(
     campaignId: string,
@@ -663,11 +680,18 @@ export class WebhookService {
     // REGRA: sentCount e failedCount NUNCA decrementam (são os contadores principais)
     // deliveredCount e readCount são métricas adicionais que podem decrementar
 
-    // Decrementa o contador do status anterior (se houver e se não for SENT/FAILED)
+    // Contadores são EXCLUSIVOS: cada mensagem conta em exatamente um bucket.
+    // sentCount + failedCount + pendingCount = totalRecipients (sempre)
+    // deliveredCount e readCount são sub-métricas de sentCount.
+
+    // Decrementa o contador do status anterior
     if (previousStatus) {
       switch (previousStatus) {
         case 'SENT':
-          // NÃO decrementa sentCount - é um contador final!
+          // Decrementa sentCount ao sair de SENT (ex: SENT → FAILED)
+          if (newStatus === 'FAILED') {
+            updateData.sentCount = { decrement: 1 };
+          }
           break;
         case 'DELIVERED':
           updateData.deliveredCount = { decrement: 1 };
@@ -676,7 +700,6 @@ export class WebhookService {
           updateData.readCount = { decrement: 1 };
           break;
         case 'FAILED':
-          // NÃO decrementa failedCount - é um contador final!
           break;
       }
     }
@@ -684,7 +707,6 @@ export class WebhookService {
     // Incrementa o contador do novo status
     switch (newStatus) {
       case 'SENT':
-        // Só incrementa se não havia status anterior (primeira vez sendo enviado)
         if (!previousStatus) {
           updateData.sentCount = { increment: 1 };
         }
@@ -696,7 +718,6 @@ export class WebhookService {
         updateData.readCount = { increment: 1 };
         break;
       case 'FAILED':
-        // Incrementa apenas quando entramos em falha pela primeira vez
         if (previousStatus !== 'FAILED') {
           updateData.failedCount = { increment: 1 };
         }
@@ -809,8 +830,12 @@ export class WebhookService {
       variants.add(normalized.slice(2));
     }
 
+    // Limita a campanhas recentes (últimas 72h) para evitar cross-campaign match
+    const recentCutoff = new Date(Date.now() - 72 * 60 * 60 * 1000);
+
     return this.prisma.message.findFirst({
       where: {
+        createdAt: { gte: recentCutoff },
         OR: Array.from(variants).map((value) => ({
           phoneNumber: {
             endsWith: value,

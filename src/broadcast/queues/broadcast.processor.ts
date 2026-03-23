@@ -7,6 +7,7 @@ import { ChannelDispatcherFactory } from '../services/channel-dispatcher.factory
 import {
   CampaignWebhookService,
   BroadcastMessageSummary,
+  MessageResultItem,
 } from '../services/campaign-webhook.service';
 import { Queue } from 'bullmq';
 
@@ -45,6 +46,11 @@ export class BroadcastProcessor extends WorkerHost {
   private readonly counterBuffer = new Map<
     string,
     { sentDelta: number; failedDelta: number; lastFlush: number; flushPromise?: Promise<void> }
+  >();
+  // Buffer para agrupar resultados de mensagens antes de enviar webhook
+  private readonly messageResultsBuffer = new Map<
+    string,
+    { items: MessageResultItem[]; firstBuffered: number }
   >();
 
   constructor(
@@ -120,6 +126,16 @@ export class BroadcastProcessor extends WorkerHost {
       // Atualiza contadores da campanha com buffer (reduz writes)
       await this.bufferCounters(campaignId, { sentDelta: 1 });
 
+      // Bufferiza resultado da mensagem para webhook em lote
+      await this.bufferMessageResult(campaignId, {
+        phoneNumber: recipientPhone,
+        name: recipientName,
+        externalId: result.externalId ?? null,
+        status: 'SENT',
+        sentAt: new Date().toISOString(),
+        errorMessage: null,
+      });
+
       // Envia webhook de progresso (throttled)
       const updatedCampaign = await this.prisma.campaign.findUnique({
         where: { id: campaignId },
@@ -165,8 +181,23 @@ export class BroadcastProcessor extends WorkerHost {
         },
       });
 
-      // Atualiza contador de falhas via buffer
-      await this.bufferCounters(campaignId, { failedDelta: 1 });
+      const attempts = job.opts.attempts ?? 1;
+      const isLastAttempt = job.attemptsMade + 1 >= attempts;
+
+      // Só incrementa failedCount na última tentativa ou erro permanente
+      // para evitar double-counting em retries do BullMQ
+      if (isPermanentError || isLastAttempt) {
+        await this.bufferCounters(campaignId, { failedDelta: 1 });
+
+        await this.bufferMessageResult(campaignId, {
+          phoneNumber: recipientPhone,
+          name: recipientName,
+          externalId: null,
+          status: 'FAILED',
+          sentAt: null,
+          errorMessage: error.message,
+        });
+      }
 
       // Envia webhook de progresso (throttled)
       const updatedCampaign = await this.prisma.campaign.findUnique({
@@ -178,9 +209,6 @@ export class BroadcastProcessor extends WorkerHost {
 
       // Verifica se todos os destinatários foram processados
       await this.checkAndCompleteCampaign(campaignId);
-
-      const attempts = job.opts.attempts ?? 1;
-      const isLastAttempt = job.attemptsMade + 1 >= attempts;
 
       if (isPermanentError || isLastAttempt) {
         this.logger.warn(
@@ -272,6 +300,8 @@ export class BroadcastProcessor extends WorkerHost {
   private async checkAndCompleteCampaign(campaignId: string) {
     // Garante flush de contadores pendentes antes de checar conclusão
     await this.flushCounters(campaignId, true);
+    // Garante flush de resultados de mensagens pendentes antes de checar conclusão
+    await this.flushMessageResults(campaignId, true);
 
     this.logger.debug(`🔍 Verificando conclusão da campanha ${campaignId}`);
 
@@ -404,6 +434,59 @@ export class BroadcastProcessor extends WorkerHost {
         failedCount: { increment: failedDelta },
       },
     });
+  }
+
+  private async bufferMessageResult(
+    campaignId: string,
+    result: MessageResultItem,
+  ): Promise<void> {
+    const now = Date.now();
+    const entry = this.messageResultsBuffer.get(campaignId) || {
+      items: [],
+      firstBuffered: now,
+    };
+
+    entry.items.push(result);
+    this.messageResultsBuffer.set(campaignId, entry);
+
+    const shouldFlush = entry.items.length >= 50 || (now - entry.firstBuffered) >= 5000;
+
+    if (shouldFlush) {
+      await this.flushMessageResults(campaignId, false);
+    }
+  }
+
+  private async flushMessageResults(campaignId: string, force: boolean): Promise<void> {
+    const entry = this.messageResultsBuffer.get(campaignId);
+    if (!entry || entry.items.length === 0) {
+      return;
+    }
+
+    if (!force && entry.items.length === 0) {
+      return;
+    }
+
+    const items = [...entry.items];
+    entry.items = [];
+    entry.firstBuffered = Date.now();
+    this.messageResultsBuffer.set(campaignId, entry);
+
+    try {
+      const campaign = await this.prisma.campaign.findUnique({
+        where: { id: campaignId },
+      });
+
+      if (!campaign) {
+        this.logger.warn(`Campanha ${campaignId} não encontrada para flush de messageResults`);
+        return;
+      }
+
+      await this.campaignWebhookService.sendMessageResults(campaign, items);
+    } catch (error) {
+      this.logger.error(
+        `Erro ao enviar webhook messageResults para campanha ${campaignId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /**

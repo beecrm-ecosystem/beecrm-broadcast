@@ -135,7 +135,7 @@ const overallMetricsSchema = {
 };
 
 @ApiTags('Metrics')
-@Controller('api/metrics')
+@Controller('metrics')
 export class MetricsController {
   private readonly logger = new Logger(MetricsController.name);
 

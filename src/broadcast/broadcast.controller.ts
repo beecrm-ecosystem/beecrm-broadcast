@@ -106,6 +106,11 @@ const campaignBaseProperties = {
   failedCount: { type: 'number', example: 150 },
   responsesCount: { type: 'number', example: 420 },
   respondedCount: { type: 'number', example: 310 },
+  engagedCount: {
+    type: 'number',
+    example: 280,
+    description: 'Destinatários que responderam dentro da janela de 24h após o envio',
+  },
   responseTimeTotalSeconds: { type: 'number', example: 15400 },
   optOutCount: { type: 'number', example: 20 },
   lastResponseAt: { type: 'string', format: 'date-time', nullable: true },
@@ -200,6 +205,12 @@ const campaignRecipientSchema = {
     deliveredAt: { type: 'string', format: 'date-time', nullable: true },
     readAt: { type: 'string', format: 'date-time', nullable: true },
     respondedAt: { type: 'string', format: 'date-time', nullable: true },
+    engagedAt: {
+      type: 'string',
+      format: 'date-time',
+      nullable: true,
+      description: 'Primeira resposta dentro de 24h após o envio (engajamento qualificado)',
+    },
     lastResponseAt: { type: 'string', format: 'date-time', nullable: true },
     responseCount: { type: 'number', example: 2 },
     variables: {
@@ -296,6 +307,11 @@ const campaignStatsSchema = {
         failed: { type: 'number', example: 150 },
         pending: { type: 'number', example: 650 },
         responded: { type: 'number', example: 480 },
+        engaged: {
+          type: 'number',
+          example: 430,
+          description: 'Destinatários que responderam dentro da janela de 24h',
+        },
         optedOut: { type: 'number', example: 25 },
       },
     },
@@ -307,6 +323,11 @@ const campaignStatsSchema = {
         read: { type: 'string', example: '87.80%' },
         failure: { type: 'string', example: '3.00%' },
         response: { type: 'string', example: '9.60%' },
+        engagement: {
+          type: 'string',
+          example: '8.60%',
+          description: 'Destinatários engajados (responderam em até 24h) / total',
+        },
         optOut: { type: 'string', example: '0.50%' },
       },
     },
@@ -972,6 +993,13 @@ export class BroadcastController {
   @ApiParam({ name: 'id', description: 'Identificador da campanha' })
   @ApiQuery({ name: 'page', required: false, description: 'Página de resultados', type: Number })
   @ApiQuery({ name: 'limit', required: false, description: 'Quantidade por página', type: Number })
+  @ApiQuery({
+    name: 'engaged',
+    required: false,
+    description:
+      'Filtra destinatários por engajamento. true = responderam em até 24h após o envio; false = não engajaram',
+    type: Boolean,
+  })
   @ApiResponse({
     status: 200,
     description: 'Destinatários retornados com sucesso',
@@ -991,8 +1019,11 @@ export class BroadcastController {
     @Param('id') id: string,
     @Query('page') page?: number,
     @Query('limit') limit?: number,
+    @Query('engaged') engaged?: string,
   ) {
-    return this.broadcastService.getRecipients(id, page, limit);
+    const engagedFilter =
+      engaged === undefined ? undefined : engaged === 'true' ? true : engaged === 'false' ? false : undefined;
+    return this.broadcastService.getRecipients(id, page, limit, { engaged: engagedFilter });
   }
 
   /**

@@ -71,6 +71,8 @@ interface MetaIncomingMessage {
   [key: string]: any;
 }
 
+const ENGAGEMENT_WINDOW_SECONDS = 24 * 60 * 60; // 24 horas
+
 @Injectable()
 export class WebhookService {
   private readonly logger = new Logger(WebhookService.name);
@@ -914,6 +916,16 @@ export class WebhookService {
 
         if (hasResponseTime) {
           recipientUpdate.firstResponseTimeSeconds = responseTimeSeconds;
+        }
+
+        // Engajamento: primeira resposta dentro da janela de 24h após o envio
+        const isEngaged =
+          hasResponseTime && (responseTimeSeconds as number) <= ENGAGEMENT_WINDOW_SECONDS;
+
+        if (isEngaged) {
+          recipientUpdate.engagedAt = responseTimestamp;
+          campaignUpdate.engagedCount = { increment: 1 };
+          recipient.engagedAt = responseTimestamp;
         }
 
         recipient.respondedAt = responseTimestamp;

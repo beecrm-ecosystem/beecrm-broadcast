@@ -13,6 +13,7 @@ export interface CampaignMetrics {
   failedCount: number;
   responsesCount: number;
   respondedCount: number;
+  engagedCount: number;
   optOutCount: number;
   pendingCount: number;
   progress: number;
@@ -22,6 +23,7 @@ export interface CampaignMetrics {
     read: number;
     failure: number;
     response: number;
+    engagement: number;
     optOut: number;
   };
   timestamps: {
@@ -99,9 +101,11 @@ export class MetricsService {
     failedMessages: number;
     responsesCount: number;
     respondedContacts: number;
+    engagedContacts: number;
     optOutCount: number;
     successRate: number;
     responseRate: number;
+    engagementRate: number;
     optOutRate: number;
     averageResponseTimeSeconds: number;
     averageResponseTimeHumanized: string;
@@ -123,6 +127,10 @@ export class MetricsService {
       (sum, c) => sum + ((c as any).respondedCount ?? 0),
       0,
     );
+    const engagedContacts = campaigns.reduce(
+      (sum, c) => sum + ((c as any).engagedCount ?? 0),
+      0,
+    );
     const optOutCount = campaigns.reduce((sum, c) => sum + ((c as any).optOutCount ?? 0), 0);
     const totalResponseTimeSeconds = campaigns.reduce(
       (sum, c) => sum + ((c as any).responseTimeTotalSeconds ?? 0),
@@ -131,6 +139,7 @@ export class MetricsService {
 
     const successRate = totalMessages > 0 ? (sentMessages / totalMessages) * 100 : 0;
     const responseRate = totalMessages > 0 ? (respondedContacts / totalMessages) * 100 : 0;
+    const engagementRate = totalMessages > 0 ? (engagedContacts / totalMessages) * 100 : 0;
     const optOutRate = totalMessages > 0 ? (optOutCount / totalMessages) * 100 : 0;
     const averageResponseTimeSeconds =
       respondedContacts > 0 ? totalResponseTimeSeconds / respondedContacts : 0;
@@ -144,9 +153,11 @@ export class MetricsService {
       failedMessages,
       responsesCount,
       respondedContacts,
+      engagedContacts,
       optOutCount,
       successRate: Number(successRate.toFixed(2)),
       responseRate: Number(responseRate.toFixed(2)),
+      engagementRate: Number(engagementRate.toFixed(2)),
       optOutRate: Number(optOutRate.toFixed(2)),
       averageResponseTimeSeconds: Number(averageResponseTimeSeconds.toFixed(2)),
       averageResponseTimeHumanized: this.formatDuration(averageResponseTimeSeconds),
@@ -166,11 +177,13 @@ export class MetricsService {
     readMessages: number;
     responsesCount: number;
     respondedContacts: number;
+    engagedContacts: number;
     optOutCount: number;
     successRate: number;
     deliveryRate: number;
     readRate: number;
     responseRate: number;
+    engagementRate: number;
     optOutRate: number;
     averageResponseTimeSeconds: number;
     averageResponseTimeHumanized: string;
@@ -197,6 +210,10 @@ export class MetricsService {
       (sum, c) => sum + ((c as any).respondedCount ?? 0),
       0,
     );
+    const engagedContacts = campaigns.reduce(
+      (sum, c) => sum + ((c as any).engagedCount ?? 0),
+      0,
+    );
     const optOutCount = campaigns.reduce((sum, c) => sum + ((c as any).optOutCount ?? 0), 0);
     const totalResponseTimeSeconds = campaigns.reduce(
       (sum, c) => sum + ((c as any).responseTimeTotalSeconds ?? 0),
@@ -207,6 +224,7 @@ export class MetricsService {
     const deliveryRate = sentMessages > 0 ? (deliveredMessages / sentMessages) * 100 : 0;
     const readRate = deliveredMessages > 0 ? (readMessages / deliveredMessages) * 100 : 0;
     const responseRate = totalMessages > 0 ? (respondedContacts / totalMessages) * 100 : 0;
+    const engagementRate = totalMessages > 0 ? (engagedContacts / totalMessages) * 100 : 0;
     const optOutRate = totalMessages > 0 ? (optOutCount / totalMessages) * 100 : 0;
     const averageResponseTimeSeconds =
       respondedContacts > 0 ? totalResponseTimeSeconds / respondedContacts : 0;
@@ -221,11 +239,13 @@ export class MetricsService {
       readMessages,
       responsesCount,
       respondedContacts,
+      engagedContacts,
       optOutCount,
       successRate: Number(successRate.toFixed(2)),
       deliveryRate: Number(deliveryRate.toFixed(2)),
       readRate: Number(readRate.toFixed(2)),
       responseRate: Number(responseRate.toFixed(2)),
+      engagementRate: Number(engagementRate.toFixed(2)),
       optOutRate: Number(optOutRate.toFixed(2)),
       averageResponseTimeSeconds: Number(averageResponseTimeSeconds.toFixed(2)),
       averageResponseTimeHumanized: this.formatDuration(averageResponseTimeSeconds),
@@ -239,6 +259,7 @@ export class MetricsService {
     const pendingCount = campaign.totalRecipients - campaign.sentCount - campaign.failedCount;
     const responsesCount = campaign.responsesCount ?? 0;
     const respondedCount = campaign.respondedCount ?? 0;
+    const engagedCount = campaign.engagedCount ?? 0;
     const responseTimeTotalSeconds = campaign.responseTimeTotalSeconds ?? 0;
     const optOutCount = campaign.optOutCount ?? 0;
     const averageResponseSeconds =
@@ -265,6 +286,8 @@ export class MetricsService {
 
     const responseRate =
       campaign.totalRecipients > 0 ? (respondedCount / campaign.totalRecipients) * 100 : 0;
+    const engagementRate =
+      campaign.totalRecipients > 0 ? (engagedCount / campaign.totalRecipients) * 100 : 0;
     const optOutRate =
       campaign.totalRecipients > 0 ? (optOutCount / campaign.totalRecipients) * 100 : 0;
 
@@ -279,6 +302,7 @@ export class MetricsService {
       failedCount: campaign.failedCount,
       responsesCount,
       respondedCount,
+      engagedCount,
       optOutCount,
       pendingCount,
       progress: Number(progress.toFixed(2)),
@@ -288,6 +312,7 @@ export class MetricsService {
         read: Number(readRate.toFixed(2)),
         failure: Number(failureRate.toFixed(2)),
         response: Number(responseRate.toFixed(2)),
+        engagement: Number(engagementRate.toFixed(2)),
         optOut: Number(optOutRate.toFixed(2)),
       },
       timestamps: {

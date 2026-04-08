@@ -381,16 +381,29 @@ export class BroadcastService {
   /**
    * Obtém os destinatários de uma campanha
    */
-  async getRecipients(campaignId: string, page: number = 1, limit: number = 50) {
+  async getRecipients(
+    campaignId: string,
+    page: number = 1,
+    limit: number = 50,
+    filters: { engaged?: boolean } = {},
+  ) {
     await this.findOne(campaignId);
 
     const skip = (page - 1) * limit;
 
+    const where: any = { campaignId };
+    if (filters.engaged === true) {
+      where.engagedAt = { not: null };
+    } else if (filters.engaged === false) {
+      where.engagedAt = null;
+    }
+
     const [recipients, total] = await Promise.all([
       this.prisma.campaignRecipient.findMany({
-        where: { campaignId },
+        where,
         skip,
         take: limit,
+        orderBy: filters.engaged === true ? { engagedAt: 'desc' } : undefined,
         include: {
           messages: {
             select: {
@@ -408,7 +421,7 @@ export class BroadcastService {
         },
       }),
       this.prisma.campaignRecipient.count({
-        where: { campaignId },
+        where,
       }),
     ]);
 
@@ -605,6 +618,7 @@ export class BroadcastService {
   async getCampaignStats(id: string): Promise<CampaignStatsDto> {
     const campaign = await this.findOne(id);
     const respondedCount = (campaign as any).respondedCount ?? 0;
+    const engagedCount = (campaign as any).engagedCount ?? 0;
     const optOutCount = (campaign as any).optOutCount ?? 0;
     const responseTimeTotalSeconds = (campaign as any).responseTimeTotalSeconds ?? 0;
     const averageResponseTimeSeconds =
@@ -637,6 +651,12 @@ export class BroadcastService {
         ? ((respondedCount / campaign.totalRecipients) * 100).toFixed(2)
         : '0.00';
 
+    // Taxa de engajamento: destinatários que responderam dentro de 24h / total
+    const engagementRate =
+      campaign.totalRecipients > 0
+        ? ((engagedCount / campaign.totalRecipients) * 100).toFixed(2)
+        : '0.00';
+
     const optOutRate =
       campaign.totalRecipients > 0
         ? ((optOutCount / campaign.totalRecipients) * 100).toFixed(2)
@@ -664,6 +684,7 @@ export class BroadcastService {
         failed: campaign.failedCount,
         pending,
         responded: respondedCount,
+        engaged: engagedCount,
         optedOut: optOutCount,
       },
       rates: {
@@ -672,6 +693,7 @@ export class BroadcastService {
         read: `${readRate}%`,
         failure: `${failureRate}%`,
         response: `${responseRate}%`,
+        engagement: `${engagementRate}%`,
         optOut: `${optOutRate}%`,
       },
       responseTimes: {

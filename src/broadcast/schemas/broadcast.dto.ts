@@ -297,6 +297,7 @@ export class CampaignStatsDto {
     failed: number;
     pending: number;
     responded: number;
+    engaged: number;
     optedOut: number;
   };
   rates: {
@@ -305,6 +306,7 @@ export class CampaignStatsDto {
     read: string;
     failure: string;
     response: string;
+    engagement: string;
     optOut: string;
   };
   responseTimes: {

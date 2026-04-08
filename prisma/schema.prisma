@@ -192,6 +192,7 @@ model Campaign {
   failedCount       Int           @default(0)
   responsesCount    Int           @default(0)
   respondedCount    Int           @default(0)
+  engagedCount      Int           @default(0)  // Destinatários que responderam dentro da janela de 24h
   responseTimeTotalSeconds Float   @default(0)
   optOutCount       Int           @default(0)
   lastResponseAt    DateTime?
@@ -233,6 +234,7 @@ model CampaignRecipient {
   deliveredAt     DateTime?     // Quando foi entregue
   readAt          DateTime?     // Quando foi lido
   respondedAt     DateTime?     // Quando respondeu pela primeira vez
+  engagedAt       DateTime?     // Primeira resposta dentro de 24h após sentAt (engajamento qualificado)
   lastResponseAt  DateTime?     // Última resposta registrada
   responseCount     Int           @default(0)
   firstResponseTimeSeconds Float?
@@ -259,6 +261,7 @@ model CampaignRecipient {
   @@unique([campaignId, phoneNumber])
   @@index([campaignId])
   @@index([campaignId, status])
+  @@index([campaignId, engagedAt])
   @@index([phoneNumber])
   @@map("campaign_recipients")
 }

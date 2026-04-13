@@ -43,6 +43,7 @@ export class WhatsAppDispatcher implements ChannelDispatcher {
         messageTimestamp: response.messageTimestamp,
         instanceId: response.instanceId,
         diogenes_status: response.status,
+        httpStatusCode: (response as any).httpStatusCode,
       },
     };
   }

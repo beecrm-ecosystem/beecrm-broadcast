@@ -60,6 +60,7 @@ export class RcsDispatcher implements ChannelDispatcher {
           provider: 'pontaltech',
           rcsMessageType: templateData.rcs_message_type,
           responseData: response.data,
+          httpStatusCode: response.status,
         },
       };
     } catch (error) {

@@ -99,6 +99,7 @@ export class DiogenesService {
       );
 
       const payload = response?.data;
+      const httpStatusCode = response?.status;
 
       if (!payload) {
         throw new Error('Resposta vazia do Diogenes');
@@ -113,6 +114,9 @@ export class DiogenesService {
 
       // Sucesso fecha o circuito
       this.resetBreaker();
+
+      // Anexa o HTTP status code ao payload para rastreamento
+      (payload as any).httpStatusCode = httpStatusCode;
 
       return payload;
     } catch (error) {

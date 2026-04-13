@@ -167,6 +167,25 @@ export class BroadcastProcessor extends WorkerHost {
         this.logger.error(`Erro permanente (${error.response.status}) - não será feito retry`);
       }
 
+      const httpStatusCode = error.response?.status || 'UNKNOWN';
+
+      // Cria registro de mensagem com o erro
+      await this.prisma.message.create({
+        data: {
+          campaignId,
+          recipientId,
+          templateId: templateData.id || templateName,
+          phoneNumber: recipientPhone,
+          status: 'FAILED',
+          failedAt: new Date(),
+          errorCode: String(httpStatusCode),
+          errorMessage: error.message,
+          metadata: {
+            httpStatusCode,
+          },
+        },
+      });
+
       // Marca como falha no banco
       await this.prisma.campaignRecipient.update({
         where: { id: recipientId },
@@ -174,7 +193,8 @@ export class BroadcastProcessor extends WorkerHost {
           status: 'FAILED',
           metadata: {
             error: error.message,
-            errorCode: error.response?.status || 'UNKNOWN',
+            errorCode: httpStatusCode,
+            httpStatusCode,
             failedAt: new Date(),
             attemptNumber: job.attemptsMade,
           },

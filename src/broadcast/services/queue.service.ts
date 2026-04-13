@@ -100,6 +100,13 @@ export class QueueService {
       const templateOverride = recipientMeta?.templateOverride ?? null;
       const templateData = templateOverride || campaignTemplateData;
 
+      // Salva templateInfo no metadata do recipient para rastreamento
+      const templateInfo = {
+        name: templateData.name || campaign.templateId,
+        category: templateData.category || (campaignTemplateData as any).category || null,
+      };
+      this.saveTemplateInfo(recipient.id, recipientMeta, templateInfo);
+
       const jobData: SendMessageJob = {
         campaignId: campaign.id,
         recipientId: recipient.id,
@@ -373,6 +380,13 @@ export class QueueService {
       const templateOverride = recipientMeta?.templateOverride ?? null;
       const templateData = templateOverride || campaignTemplateData;
 
+      // Salva templateInfo no metadata do recipient para rastreamento
+      const templateInfo = {
+        name: templateData.name || campaign.templateId,
+        category: templateData.category || (campaignTemplateData as any).category || null,
+      };
+      this.saveTemplateInfo(recipient.id, recipientMeta, templateInfo);
+
       const jobData: SendMessageJob = {
         campaignId: campaign.id,
         recipientId: recipient.id,
@@ -475,5 +489,24 @@ export class QueueService {
     }
 
     return {};
+  }
+
+  /**
+   * Salva templateInfo no metadata do recipient (fire-and-forget)
+   */
+  private saveTemplateInfo(
+    recipientId: string,
+    currentMeta: Record<string, any> | null,
+    templateInfo: { name: string; category: string | null },
+  ) {
+    const merged = { ...(currentMeta || {}), templateInfo };
+    this.prisma.campaignRecipient
+      .update({
+        where: { id: recipientId },
+        data: { metadata: merged },
+      })
+      .catch((err) => {
+        this.logger.warn(`Falha ao salvar templateInfo do recipient ${recipientId}: ${err.message}`);
+      });
   }
 }

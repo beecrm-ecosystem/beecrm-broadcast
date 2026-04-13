@@ -103,7 +103,10 @@ export class QueueService {
       // Salva templateInfo no metadata do recipient para rastreamento
       const templateInfo = {
         name: templateData.name || campaign.templateId,
-        category: templateData.category || (campaignTemplateData as any).category || null,
+        category: templateData.category
+          || (campaignTemplateData as any).category
+          || this.findCategoryFromTimeWindows(campaign, templateData.name)
+          || null,
       };
       this.saveTemplateInfo(recipient.id, recipientMeta, templateInfo);
 
@@ -383,7 +386,10 @@ export class QueueService {
       // Salva templateInfo no metadata do recipient para rastreamento
       const templateInfo = {
         name: templateData.name || campaign.templateId,
-        category: templateData.category || (campaignTemplateData as any).category || null,
+        category: templateData.category
+          || (campaignTemplateData as any).category
+          || this.findCategoryFromTimeWindows(campaign, templateData.name)
+          || null,
       };
       this.saveTemplateInfo(recipient.id, recipientMeta, templateInfo);
 
@@ -489,6 +495,16 @@ export class QueueService {
     }
 
     return {};
+  }
+
+  /**
+   * Busca a category do template nos timeWindows da campanha
+   */
+  private findCategoryFromTimeWindows(campaign: any, templateName: string): string | null {
+    const timeWindows = (campaign.timeWindows as any[]) || [];
+    if (!timeWindows.length || !templateName) return null;
+    const match = timeWindows.find((w: any) => w.templateName === templateName);
+    return match?.category || timeWindows[0]?.category || null;
   }
 
   /**

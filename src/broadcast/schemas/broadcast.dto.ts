@@ -81,6 +81,15 @@ export class CreateCampaignDto {
     timezone?: string;
   }>;
 
+  @IsBoolean()
+  @IsOptional()
+  distributeEvenly?: boolean;
+
+  @IsNumber()
+  @IsOptional()
+  @Min(1)
+  tierRatePerMinute?: number;
+
   @IsArray()
   @IsString({ each: true })
   @IsOptional()
@@ -88,7 +97,11 @@ export class CreateCampaignDto {
 
   @Transform(({ value }) => {
     if (typeof value === 'string') {
-      try { return JSON.parse(value); } catch { return {}; }
+      try {
+        return JSON.parse(value);
+      } catch {
+        return {};
+      }
     }
     if (Array.isArray(value) && value.length === 0) return {};
     return value;

@@ -80,6 +80,12 @@ export class QueueService {
 
     this.logger.log(`Enfileirando ${recipients.length} destinatários da campanha ${campaign.name}`);
 
+    // Distribuição uniforme: calcula delay individual por mensagem
+    const timeWindows = (campaign.timeWindows as any[]) || [];
+    if (campaign.distributeEvenly && timeWindows.length > 0) {
+      return this.enqueueDistributeEvenly(campaign, recipients, recipientIdsToQueue);
+    }
+
     const campaignTemplateData = campaign.templateData as any;
     const batchSize = Math.max(1, campaign.batchSize || 1);
     const delayBetweenBatches = Math.max(0, campaign.delayBetweenBatches ?? 0);
@@ -258,6 +264,162 @@ export class QueueService {
     return {
       removed: campaignJobs.length,
       message: `${campaignJobs.length} jobs removidos da fila`,
+    };
+  }
+
+  /**
+   * Enfileira destinatários com distribuição uniforme na janela de envio.
+   * Calcula o delay individual entre mensagens para espalhar uniformemente
+   * dentro da janela (ex: 09:00-19:00). Respeita o teto do tier do canal.
+   * Destinatários que excedem a capacidade da janela ficam PENDING para
+   * serem enfileirados no próximo dia pelo monitor.
+   */
+  private async enqueueDistributeEvenly(
+    campaign: any,
+    recipients: any[],
+    recipientIdsToQueue: string[],
+  ) {
+    const timeWindows = (campaign.timeWindows as any[]) || [];
+    const window = timeWindows[0];
+    const tz = window.timezone || 'America/Sao_Paulo';
+
+    // Parse janela de envio
+    const [startH, startM] = window.startTime.split(':').map(Number);
+    const [endH, endM] = window.endTime.split(':').map(Number);
+    const startMinutes = startH * 60 + startM;
+    const endMinutes = endH * 60 + endM;
+    const windowMinutes =
+      endMinutes > startMinutes ? endMinutes - startMinutes : 24 * 60 - startMinutes + endMinutes; // overnight
+
+    // Calcular ritmo necessário (msg/min)
+    let ratePerMinute = recipients.length / windowMinutes;
+    const tierCap = campaign.tierRatePerMinute;
+
+    let recipientsToEnqueue = recipients;
+    let overflowCount = 0;
+
+    // Se excede o tier, limita e calcula overflow
+    if (tierCap && ratePerMinute > tierCap) {
+      ratePerMinute = tierCap;
+      const maxPerWindow = Math.floor(tierCap * windowMinutes);
+
+      if (maxPerWindow < recipients.length) {
+        overflowCount = recipients.length - maxPerWindow;
+        recipientsToEnqueue = recipients.slice(0, maxPerWindow);
+
+        // Reverte overflow para PENDING (não serão enfileirados agora)
+        const overflowIds = recipients.slice(maxPerWindow).map((r) => r.id);
+        await this.prisma.campaignRecipient.updateMany({
+          where: { id: { in: overflowIds } },
+          data: { status: MessageStatus.PENDING },
+        });
+
+        this.logger.warn(
+          `📊 Distribute evenly: ${overflowCount} destinatários excederam a capacidade da janela ` +
+            `(max ${maxPerWindow} com tier ${tierCap} msg/min × ${windowMinutes}min). ` +
+            `Serão reagendados no próximo dia.`,
+        );
+      }
+    }
+
+    // Garantir mínimo 1 msg/min
+    ratePerMinute = Math.max(ratePerMinute, 1 / 60); // pelo menos 1 msg/hora
+    const delayBetweenMessagesMs = Math.round(60000 / ratePerMinute);
+
+    // Calcular offset inicial: se estamos antes da janela, atrasar até o startTime
+    const now = new Date();
+    const localNow = new Date(now.toLocaleString('en-US', { timeZone: tz }));
+    const currentMinutes = localNow.getHours() * 60 + localNow.getMinutes();
+
+    let initialOffsetMs = 0;
+    const isOvernight = endMinutes <= startMinutes;
+
+    if (isOvernight) {
+      // Janela overnight (ex: 22:00-06:00)
+      const isInside = currentMinutes >= startMinutes || currentMinutes < endMinutes;
+      if (!isInside) {
+        if (currentMinutes < startMinutes) {
+          initialOffsetMs = (startMinutes - currentMinutes) * 60000;
+        } else {
+          initialOffsetMs = (24 * 60 - currentMinutes + startMinutes) * 60000;
+        }
+      }
+    } else {
+      // Janela normal
+      if (currentMinutes < startMinutes) {
+        initialOffsetMs = (startMinutes - currentMinutes) * 60000;
+      } else if (currentMinutes >= endMinutes) {
+        // Passou da janela de hoje — offset para amanhã no startTime
+        initialOffsetMs = (24 * 60 - currentMinutes + startMinutes) * 60000;
+      }
+    }
+
+    this.logger.log(
+      `📊 Distribute evenly: ${recipientsToEnqueue.length} msgs na janela ` +
+        `${window.startTime}-${window.endTime} (${windowMinutes}min), ` +
+        `ritmo=${ratePerMinute.toFixed(2)} msg/min, ` +
+        `delay entre msgs=${Math.round(delayBetweenMessagesMs / 1000)}s, ` +
+        `offset inicial=${Math.round(initialOffsetMs / 60000)}min` +
+        (tierCap ? `, tier cap=${tierCap} msg/min` : '') +
+        (overflowCount > 0 ? `, overflow=${overflowCount}` : ''),
+    );
+
+    const campaignTemplateData = campaign.templateData;
+
+    const jobs = recipientsToEnqueue.map((recipient, index) => {
+      const delay = initialOffsetMs + index * delayBetweenMessagesMs;
+
+      const recipientMeta = recipient.metadata as Record<string, any> | null;
+      const templateOverride = recipientMeta?.templateOverride ?? null;
+      const templateData = templateOverride || campaignTemplateData;
+
+      const jobData: SendMessageJob = {
+        campaignId: campaign.id,
+        recipientId: recipient.id,
+        recipientPhone: recipient.phoneNumber,
+        recipientName: recipient.name || 'Cliente',
+        recipientVariables: this.buildRecipientVariables(recipient),
+        templateData: templateData,
+        channel: campaign.channel,
+        templateName: templateData.name || campaign.templateId,
+        templateLanguage: templateData.language || 'pt_BR',
+      };
+
+      return {
+        name: `send-${campaign.id}-${recipient.id}`,
+        data: jobData,
+        opts: {
+          delay,
+          attempts: 3,
+          backoff: { type: 'exponential' as const, delay: 1000 },
+          removeOnComplete: { age: 3600, count: 1000 },
+          removeOnFail: { age: 86400 },
+        },
+      };
+    });
+
+    try {
+      await this.broadcastQueue.addBulk(jobs);
+    } catch (error) {
+      // Reverte todos para PENDING se falhar
+      await this.prisma.campaignRecipient.updateMany({
+        where: { id: { in: recipientIdsToQueue } },
+        data: { status: MessageStatus.PENDING },
+      });
+      throw error;
+    }
+
+    this.logger.log(
+      `✅ ${jobs.length} mensagens enfileiradas (distribuição uniforme). ` +
+        (overflowCount > 0 ? `${overflowCount} pendentes para próximo dia.` : ''),
+    );
+
+    return {
+      totalEnqueued: jobs.length,
+      overflow: overflowCount,
+      ratePerMinute: Math.round(ratePerMinute * 100) / 100,
+      delayBetweenMessagesMs,
+      windowMinutes,
     };
   }
 

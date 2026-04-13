@@ -3,6 +3,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma.service';
 import { CampaignWebhookService } from './campaign-webhook.service';
+import { QueueService } from './queue.service';
 
 interface CampaignChecksum {
   sentCount: number;
@@ -22,6 +23,7 @@ export class CampaignMonitorService implements OnModuleInit {
     @InjectQueue('campaign-monitor-queue') private monitorQueue: Queue,
     private readonly prisma: PrismaService,
     private readonly campaignWebhookService: CampaignWebhookService,
+    private readonly queueService: QueueService,
   ) {}
 
   async onModuleInit() {
@@ -97,6 +99,9 @@ export class CampaignMonitorService implements OnModuleInit {
         }
       }
 
+      // Re-enfileira overflow de campanhas com distribuição uniforme
+      await this.requeueDistributeEvenlyOverflow();
+
       const duration = Date.now() - startTime;
       this.logger.log(
         `✅ Monitoramento concluído em ${duration}ms: ${updatedCount} atualizadas, ${unchangedCount} sem mudanças`,
@@ -162,6 +167,75 @@ export class CampaignMonitorService implements OnModuleInit {
     };
 
     return JSON.stringify(data);
+  }
+
+  /**
+   * Verifica campanhas com distributeEvenly=true que ainda têm destinatários PENDING
+   * e os re-enfileira se estamos dentro da janela de envio e não há jobs QUEUED.
+   */
+  private async requeueDistributeEvenlyOverflow() {
+    try {
+      const campaigns = await this.prisma.campaign.findMany({
+        where: {
+          status: 'PROCESSING',
+          distributeEvenly: true,
+        },
+      });
+
+      for (const campaign of campaigns) {
+        // Conta pendentes ativos
+        const pendingCount = await this.prisma.campaignRecipient.count({
+          where: { campaignId: campaign.id, status: 'PENDING', isActive: true },
+        });
+        if (pendingCount === 0) continue;
+
+        // Verifica se estamos dentro da janela de envio
+        if (!this.isInsideTimeWindow(campaign)) continue;
+
+        // Verifica se não há jobs QUEUED ativos (evita double-queuing)
+        const queuedCount = await this.prisma.campaignRecipient.count({
+          where: { campaignId: campaign.id, status: 'QUEUED' },
+        });
+        if (queuedCount > 0) continue;
+
+        this.logger.log(
+          `📊 Re-enfileirando ${pendingCount} destinatários overflow da campanha ${campaign.name} (distribuição uniforme)`,
+        );
+
+        await this.queueService.enqueueCampaign(campaign.id, { allowEmpty: true });
+      }
+    } catch (error) {
+      this.logger.error(
+        `Erro ao re-enfileirar overflow distribute-evenly: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Verifica se o horário atual está dentro da janela de envio da campanha.
+   */
+  private isInsideTimeWindow(campaign: any): boolean {
+    const timeWindows = (campaign.timeWindows as any[]) || [];
+    if (timeWindows.length === 0) return true;
+
+    const window = timeWindows[0];
+    if (!window?.startTime || !window?.endTime) return true;
+
+    const tz = window.timezone || 'America/Sao_Paulo';
+    const now = new Date();
+    const localTime = new Date(now.toLocaleString('en-US', { timeZone: tz }));
+    const currentMinutes = localTime.getHours() * 60 + localTime.getMinutes();
+
+    const [startH, startM] = window.startTime.split(':').map(Number);
+    const [endH, endM] = window.endTime.split(':').map(Number);
+    const startMinutes = startH * 60 + startM;
+    const endMinutes = endH * 60 + endM;
+
+    const isOvernight = endMinutes <= startMinutes;
+    if (isOvernight) {
+      return currentMinutes >= startMinutes || currentMinutes < endMinutes;
+    }
+    return currentMinutes >= startMinutes && currentMinutes < endMinutes;
   }
 
   /**

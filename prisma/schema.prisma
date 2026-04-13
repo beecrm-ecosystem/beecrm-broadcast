@@ -200,6 +200,10 @@ model Campaign {
   // Janelas de horário por template
   timeWindows     Json?           @default("[]") @map("time_windows")
 
+  // Distribuição uniforme na janela de envio
+  distributeEvenly  Boolean       @default(false) @map("distribute_evenly")
+  tierRatePerMinute Int?          @map("tier_rate_per_minute")
+
   // Metadados
   tags            String[]
   metadata        Json?           // Dados adicionais customizados

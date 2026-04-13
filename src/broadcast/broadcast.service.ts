@@ -78,6 +78,8 @@ export class BroadcastService {
           batchSize: dto.batchSize || 500,
           delayBetweenBatches: dto.delayBetweenBatches ?? 0,
           timeWindows: dto.timeWindows || [],
+          distributeEvenly: dto.distributeEvenly ?? false,
+          tierRatePerMinute: dto.tierRatePerMinute ?? null,
           tags: dto.tags || [],
           metadata: dto.metadata,
           status: initialStatus,
@@ -560,9 +562,9 @@ export class BroadcastService {
       removedJobs: removedJobs.removed,
       resetQueued: resetQueued.count,
       enqueued: queueResult.totalEnqueued,
-      batches: queueResult.batches,
-      batchSize: queueResult.batchSize,
-      delayBetweenBatches: queueResult.delayBetweenBatches,
+      batches: (queueResult as any).batches ?? null,
+      batchSize: (queueResult as any).batchSize ?? null,
+      delayBetweenBatches: (queueResult as any).delayBetweenBatches ?? null,
     };
   }
 

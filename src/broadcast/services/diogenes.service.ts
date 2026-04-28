@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
+import { isMetaApiError, tryParseMetaError } from './meta-error';
 
 export interface SendTemplateDto {
   number: string;
@@ -107,6 +108,10 @@ export class DiogenesService {
 
       if (!payload.key || !payload.key.id) {
         this.logger.error(`Resposta inválida do Diogenes: ${JSON.stringify(payload, null, 2)}`);
+        const metaError = tryParseMetaError(payload, httpStatusCode);
+        if (metaError) {
+          throw metaError;
+        }
         throw new Error('Resposta do Diogenes sem identificador da mensagem');
       }
 
@@ -121,6 +126,21 @@ export class DiogenesService {
       return payload;
     } catch (error) {
       this.logger.error(`Erro ao enviar mensagem para ${data.number}: ${error.message}`);
+
+      // Erro tipado da Meta (HTTP 200 com payload de erro). Decide
+      // backpressure pelo `policy` em vez do status HTTP.
+      if (isMetaApiError(error)) {
+        if (error.policy === 'rate_limit') {
+          this.tripBreakerForRateLimit(error.metaCode);
+          this.logger.warn(
+            `Rate limit Meta #${error.metaCode}: pausando enfileiramento (fbtrace_id=${error.fbtraceId ?? 'n/a'})`,
+          );
+          throw new Error(
+            `BACKPRESSURE: pause enqueue (meta=${error.metaCode}; ${error.metaMessage})`,
+          );
+        }
+        throw error;
+      }
 
       // Log detalhado do erro
       if (error.response) {
@@ -405,6 +425,22 @@ export class DiogenesService {
     this.breaker.state = 'CLOSED';
     this.breaker.failures = 0;
     this.breaker.nextRetryAt = 0;
+  }
+
+  /**
+   * Abre o circuit breaker imediatamente quando a Meta sinaliza rate
+   * limit (130429 etc). O cooldown cresce a cada disparo consecutivo
+   * para dar tempo do throughput voltar ao normal: 60s, 120s, 300s.
+   */
+  private tripBreakerForRateLimit(metaCode: number) {
+    this.breaker.failures += 1;
+    const ladder = [60_000, 120_000, 300_000];
+    const cooldown = ladder[Math.min(this.breaker.failures - 1, ladder.length - 1)];
+    this.breaker.state = 'OPEN';
+    this.breaker.nextRetryAt = Date.now() + cooldown;
+    this.logger.warn(
+      `Circuit breaker aberto por ${cooldown}ms após Meta #${metaCode} (failures=${this.breaker.failures})`,
+    );
   }
 
   private recordBreakerFailure(status?: number, headers?: Record<string, any>): number {

@@ -10,6 +10,8 @@ import {
   MessageResultItem,
 } from '../services/campaign-webhook.service';
 import { Queue } from 'bullmq';
+import { isMetaApiError, MetaApiError } from '../services/meta-error';
+import { QueueService } from '../services/queue.service';
 
 export interface SendMessageJob {
   campaignId: string;
@@ -53,11 +55,16 @@ export class BroadcastProcessor extends WorkerHost {
     { items: MessageResultItem[]; firstBuffered: number }
   >();
 
+  // Garante que só uma rotina de pause+resume está agendada por vez,
+  // mesmo que vários jobs em paralelo recebam BACKPRESSURE simultaneamente.
+  private backpressureUntil = 0;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly dispatcherFactory: ChannelDispatcherFactory,
     private readonly campaignWebhookService: CampaignWebhookService,
     @InjectQueue('broadcast-dlq') private readonly dlq: Queue<DeadLetterJob>,
+    private readonly queueService: QueueService,
   ) {
     super();
   }
@@ -159,15 +166,45 @@ export class BroadcastProcessor extends WorkerHost {
     } catch (error) {
       this.logger.error(`Erro ao processar envio para ${recipientPhone}: ${error.message}`);
 
-      // Verifica se é um erro permanente (não deve fazer retry)
-      const isPermanentError =
-        error.response?.status && [400, 401, 403, 404, 422].includes(error.response.status);
-
-      if (isPermanentError) {
-        this.logger.error(`Erro permanente (${error.response.status}) - não será feito retry`);
+      // Rate limit da Meta (BACKPRESSURE) ou circuit breaker aberto:
+      // não persiste falha no BD, pausa a fila por alguns segundos e
+      // relança para o BullMQ retentar quando voltar.
+      const msg = typeof error.message === 'string' ? error.message : '';
+      if (msg.startsWith('BACKPRESSURE:') || msg.startsWith('Circuit breaker aberto')) {
+        await this.applyBackpressure();
+        throw error;
       }
 
-      const httpStatusCode = error.response?.status || 'UNKNOWN';
+      const metaError = isMetaApiError(error) ? (error as MetaApiError) : null;
+
+      // Permanente: HTTP 4xx específico OU código Meta classificado como permanente.
+      const isPermanentByHttp =
+        error.response?.status && [400, 401, 403, 404, 422].includes(error.response.status);
+      const isPermanentByMeta = metaError?.policy === 'permanent';
+      const isPermanentError = Boolean(isPermanentByHttp || isPermanentByMeta);
+
+      if (isPermanentError) {
+        const reason = metaError
+          ? `Meta #${metaError.metaCode}`
+          : `HTTP ${error.response.status}`;
+        this.logger.error(`Erro permanente (${reason}) - não será feito retry`);
+      }
+
+      const httpStatusCode =
+        metaError?.httpStatusCode ?? error.response?.status ?? 'UNKNOWN';
+      const errorCode = metaError ? String(metaError.metaCode) : String(httpStatusCode);
+      const errorMessage = metaError?.metaMessage ?? error.message;
+
+      const failureMetadata: Record<string, any> = {
+        httpStatusCode,
+      };
+      if (metaError) {
+        failureMetadata.metaCode = metaError.metaCode;
+        failureMetadata.metaMessage = metaError.metaMessage;
+        failureMetadata.metaDetails = metaError.metaDetails;
+        failureMetadata.metaPolicy = metaError.policy;
+        failureMetadata.fbtraceId = metaError.fbtraceId;
+      }
 
       // Cria registro de mensagem com o erro
       await this.prisma.message.create({
@@ -178,11 +215,9 @@ export class BroadcastProcessor extends WorkerHost {
           phoneNumber: recipientPhone,
           status: 'FAILED',
           failedAt: new Date(),
-          errorCode: String(httpStatusCode),
-          errorMessage: error.message,
-          metadata: {
-            httpStatusCode,
-          },
+          errorCode,
+          errorMessage,
+          metadata: failureMetadata,
         },
       });
 
@@ -192,9 +227,9 @@ export class BroadcastProcessor extends WorkerHost {
         data: {
           status: 'FAILED',
           metadata: {
-            error: error.message,
-            errorCode: httpStatusCode,
-            httpStatusCode,
+            ...failureMetadata,
+            error: errorMessage,
+            errorCode,
             failedAt: new Date(),
             attemptNumber: job.attemptsMade,
           },
@@ -215,7 +250,7 @@ export class BroadcastProcessor extends WorkerHost {
           externalId: null,
           status: 'FAILED',
           sentAt: null,
-          errorMessage: error.message,
+          errorMessage,
         });
       }
 
@@ -239,15 +274,15 @@ export class BroadcastProcessor extends WorkerHost {
           campaignId,
           recipientId,
           phoneNumber: recipientPhone,
-          error: error.message,
-          errorCode: error.response?.status,
+          error: errorMessage,
+          errorCode,
           attempts: job.attemptsMade + 1,
-          permanent: Boolean(isPermanentError),
+          permanent: isPermanentError,
         });
 
         return {
           success: false,
-          error: error.message,
+          error: errorMessage,
           permanent: isPermanentError,
         };
       }
@@ -595,6 +630,43 @@ export class BroadcastProcessor extends WorkerHost {
       );
       return { outsideWindow: false };
     }
+  }
+
+  /**
+   * Pausa a broadcast-queue por ~60s e agenda um resume. Se vários jobs
+   * paralelos entrarem em backpressure no mesmo período, só a primeira
+   * pausa agenda o resume (os demais reaproveitam a janela existente).
+   */
+  private async applyBackpressure(cooldownMs = 60_000): Promise<void> {
+    const now = Date.now();
+    if (now < this.backpressureUntil) {
+      return;
+    }
+    this.backpressureUntil = now + cooldownMs;
+
+    try {
+      await this.queueService.pauseQueue();
+      this.logger.warn(`Backpressure: fila pausada por ${cooldownMs}ms`);
+    } catch (err) {
+      this.logger.error(
+        `Falha ao pausar fila para backpressure: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      this.backpressureUntil = 0;
+      return;
+    }
+
+    setTimeout(async () => {
+      try {
+        await this.queueService.resumeQueue();
+        this.logger.log('Backpressure: fila retomada');
+      } catch (err) {
+        this.logger.error(
+          `Falha ao retomar fila após backpressure: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      } finally {
+        this.backpressureUntil = 0;
+      }
+    }, cooldownMs).unref?.();
   }
 
   private async pushToDlq(job: {

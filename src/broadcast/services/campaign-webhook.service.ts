@@ -1,6 +1,7 @@
 import { HttpService } from '@nestjs/axios';
 import { Injectable, Logger } from '@nestjs/common';
 import { Campaign, CampaignStatus, MessageStatus } from '@prisma/client';
+import { createHmac } from 'crypto';
 import { firstValueFrom } from 'rxjs';
 
 interface UpdateStatusOptions {
@@ -70,11 +71,13 @@ export class CampaignWebhookService {
       return;
     }
 
-    const token = this.resolveToken();
-    // if (!token) {
-    //   this.logger.warn('Token para webhook de campanha não configurado');
-    //   return;
-    // }
+    const secret = this.resolveSecret();
+    if (!secret) {
+      this.logger.error(
+        'CAMPAIGN_WEBHOOK_SECRET nao configurado — o webhook nao sera enviado para evitar 401 no BeeCRM.',
+      );
+      return;
+    }
 
     const resolvedStatus = options.status ?? campaign.status;
     const statusCode = options.statusCode ?? this.mapStatus(resolvedStatus);
@@ -98,7 +101,7 @@ export class CampaignWebhookService {
       `📤 Enviando webhook update_status (campaign=${campaign.id}, status=${resolvedStatus}, code=${statusCode})`,
     );
     this.logger.debug(`Payload do webhook: ${JSON.stringify(payload, null, 2)}`);
-    await this.executeRequest(baseUrl, token || '', payload, 'update_status');
+    await this.executeRequest(baseUrl, secret, payload, 'update_status');
   }
 
   async sendBroadcastSummary(
@@ -110,11 +113,13 @@ export class CampaignWebhookService {
       return;
     }
 
-    const token = this.resolveToken();
-    // if (!token) {
-    //   this.logger.warn('Token para webhook de campanha não configurado');
-    //   return;
-    // }
+    const secret = this.resolveSecret();
+    if (!secret) {
+      this.logger.error(
+        'CAMPAIGN_WEBHOOK_SECRET nao configurado — o webhook nao sera enviado para evitar 401 no BeeCRM.',
+      );
+      return;
+    }
 
     // Calcula os valores baseados na campanha ou nas opções
     const resolvedStatus = options.status ?? campaign.status;
@@ -196,7 +201,7 @@ export class CampaignWebhookService {
       );
     }
     this.logger.debug(`Payload do webhook: ${JSON.stringify(payload, null, 2)}`);
-    await this.executeRequest(baseUrl, token || '', payload, 'broadcast:statusUpdate');
+    await this.executeRequest(baseUrl, secret, payload, 'broadcast:statusUpdate');
   }
 
   async sendMessageResults(
@@ -208,7 +213,14 @@ export class CampaignWebhookService {
       return;
     }
 
-    const token = this.resolveToken();
+    const secret = this.resolveSecret();
+    if (!secret) {
+      this.logger.error(
+        'CAMPAIGN_WEBHOOK_SECRET nao configurado — o webhook nao sera enviado para evitar 401 no BeeCRM.',
+      );
+      return;
+    }
+
     const broadcastId = this.resolveBroadcastId(campaign);
 
     const payload = {
@@ -223,18 +235,38 @@ export class CampaignWebhookService {
       `📤 Enviando webhook broadcast:messageResults (campaign=${campaign.id}, messages=${messages.length})`,
     );
     this.logger.debug(`Payload do webhook: ${JSON.stringify(payload, null, 2)}`);
-    await this.executeRequest(baseUrl, token || '', payload, 'broadcast:messageResults');
+    await this.executeRequest(baseUrl, secret, payload, 'broadcast:messageResults');
   }
 
-  private async executeRequest(baseUrl: string, token: string, payload: any, eventName: string) {
+  /**
+   * Envia o payload assinado com HMAC-SHA256 no esquema esperado pelo
+   * VerifyCampaignWebhookSignature do BeeCRM:
+   *
+   *   X-Bee-Timestamp: <unix ts em segundos>
+   *   X-Bee-Signature: hmac_sha256(`${ts}.${rawBody}`, CAMPAIGN_WEBHOOK_SECRET)
+   *
+   * O body precisa ser EXATAMENTE o mesmo bytes que o BeeCRM le em
+   * $request->getContent(). Por isso serializamos uma vez (rawBody) e
+   * enviamos a string como data, com Content-Type application/json — assim
+   * axios nao re-serializa por baixo do pano.
+   */
+  private async executeRequest(baseUrl: string, secret: string, payload: any, eventName: string) {
     try {
       const url = `${baseUrl.replace(/\/$/, '')}${this.endpointPath}`;
+      const rawBody = JSON.stringify(payload);
+      const timestamp = Math.floor(Date.now() / 1000).toString();
+      const signature = createHmac('sha256', secret)
+        .update(`${timestamp}.${rawBody}`)
+        .digest('hex');
+
       await firstValueFrom(
-        this.httpService.post(url, payload, {
+        this.httpService.post(url, rawBody, {
           headers: {
-            Authorization: `Bearer ${token}`,
             'Content-Type': 'application/json',
+            'X-Bee-Timestamp': timestamp,
+            'X-Bee-Signature': signature,
           },
+          transformRequest: [(data) => data],
         }),
       );
       this.logger.log(
@@ -288,8 +320,18 @@ export class CampaignWebhookService {
     return campaign.id;
   }
 
-  private resolveToken(): string | null {
-    return process.env.CAMPAIGN_WEBHOOK_TOKEN || process.env.BROADCAST_WEBHOOK_TOKEN || null;
+  /**
+   * Secret HMAC compartilhado com o BeeCRM (env CAMPAIGN_WEBHOOK_SECRET).
+   * Mantemos os nomes legados como fallback para nao quebrar deploys antigos
+   * enquanto o time atualiza o .env de prod/staging — remover depois.
+   */
+  private resolveSecret(): string | null {
+    return (
+      process.env.CAMPAIGN_WEBHOOK_SECRET ||
+      process.env.CAMPAIGN_WEBHOOK_TOKEN ||
+      process.env.BROADCAST_WEBHOOK_TOKEN ||
+      null
+    );
   }
 
   private mapStatus(status?: CampaignStatus): number | undefined {

@@ -2,6 +2,7 @@ import { HttpService } from '@nestjs/axios';
 import { Injectable, Logger } from '@nestjs/common';
 import { Campaign, CampaignStatus, MessageStatus } from '@prisma/client';
 import { firstValueFrom } from 'rxjs';
+import { createHmac } from 'crypto';
 
 interface UpdateStatusOptions {
   status?: CampaignStatus;
@@ -229,12 +230,32 @@ export class CampaignWebhookService {
   private async executeRequest(baseUrl: string, token: string, payload: any, eventName: string) {
     try {
       const url = `${baseUrl.replace(/\/$/, '')}${this.endpointPath}`;
+      // Corpo serializado uma unica vez: o CRM valida o HMAC sobre exatamente
+      // estes bytes (request.getContent()), entao enviamos a string crua.
+      const rawBody = JSON.stringify(payload);
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      };
+      // Assinatura esperada pelo middleware VerifyCampaignWebhookSignature do CRM:
+      // X-Bee-Signature = hmac_sha256(timestamp + '.' + rawBody, CAMPAIGN_WEBHOOK_SECRET)
+      const secret = process.env.CAMPAIGN_WEBHOOK_SECRET || '';
+      if (secret) {
+        const timestamp = Math.floor(Date.now() / 1000).toString();
+        const signature = createHmac('sha256', secret)
+          .update(`${timestamp}.${rawBody}`)
+          .digest('hex');
+        headers['X-Bee-Timestamp'] = timestamp;
+        headers['X-Bee-Signature'] = signature;
+      } else {
+        this.logger.warn(
+          'CAMPAIGN_WEBHOOK_SECRET ausente — webhook sem assinatura HMAC; o CRM ira rejeitar.',
+        );
+      }
       await firstValueFrom(
-        this.httpService.post(url, payload, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
+        this.httpService.post(url, rawBody, {
+          headers,
+          transformRequest: [(data) => data],
         }),
       );
       this.logger.log(

@@ -494,7 +494,6 @@ export class WebhookService {
     }
 
     const newStatus = this.mapRcsStatusToMessageStatus(rcsStatus);
-    const previousStatus = message.status as MessageStatus | undefined;
     const eventTimestamp = payload.timestamp
       ? this.resolveMessageTimestamp(payload.timestamp)
       : new Date();
@@ -517,71 +516,81 @@ export class WebhookService {
       `Webhook RCS recebido (campaign=${message.campaignId}, message=${message.id}, status=${rcsStatus})`,
     );
 
-    // Atualiza a mensagem
-    const messageUpdate: any = {
-      status: newStatus,
-      metadata: {
-        ...(message.metadata as Record<string, unknown>),
-        lastWebhookStatus: rcsStatus,
-        lastWebhookEventId: webhookEvent.id,
-        lastWebhookAt: eventTimestamp,
-        lastWebhookProvider: 'pontaltech',
-        ...(payload.errorCode ? { lastWebhookErrorCode: payload.errorCode } : {}),
-        ...(payload.errorMessage ? { lastWebhookErrorMessage: payload.errorMessage } : {}),
-      },
-    };
+    // Idempotência + atomicidade (espelha o path Meta): transaction + re-leitura
+    // + guard de mesmo-status. Sem isso, callbacks duplicados da Pontaltech
+    // dobram os contadores (o path Meta já tinha essa proteção; o RCS não).
+    await this.prisma.$transaction(async (tx) => {
+      const freshMessage = await tx.message.findUnique({ where: { id: message.id } });
+      if (!freshMessage) return;
 
-    if (newStatus === 'DELIVERED') {
-      messageUpdate.deliveredAt = eventTimestamp;
-    }
+      const prevStatus = freshMessage.status as MessageStatus | undefined;
+      if (prevStatus === newStatus) return; // duplicado — ignora
 
-    if (newStatus === 'READ') {
-      messageUpdate.readAt = eventTimestamp;
-    }
-
-    if (newStatus === 'FAILED') {
-      messageUpdate.failedAt = eventTimestamp;
-
-      if (payload.errorCode || payload.errorMessage) {
-        messageUpdate.errorCode = payload.errorCode ?? null;
-        messageUpdate.errorMessage = payload.errorMessage ?? null;
-        messageUpdate.errorDetails = {
-          provider: 'pontaltech',
-          errorCode: payload.errorCode,
-          errorMessage: payload.errorMessage,
-        } as any;
-      }
-    }
-
-    await this.prisma.message.update({
-      where: { id: message.id },
-      data: messageUpdate,
-    });
-
-    // Atualiza o destinatario
-    if (message.recipientId) {
-      const recipientUpdate: any = { status: newStatus };
+      const messageUpdate: any = {
+        status: newStatus,
+        metadata: {
+          ...(freshMessage.metadata as Record<string, unknown>),
+          lastWebhookStatus: rcsStatus,
+          lastWebhookEventId: webhookEvent.id,
+          lastWebhookAt: eventTimestamp,
+          lastWebhookProvider: 'pontaltech',
+          ...(payload.errorCode ? { lastWebhookErrorCode: payload.errorCode } : {}),
+          ...(payload.errorMessage ? { lastWebhookErrorMessage: payload.errorMessage } : {}),
+        },
+      };
 
       if (newStatus === 'DELIVERED') {
-        recipientUpdate.deliveredAt = eventTimestamp;
+        messageUpdate.deliveredAt = eventTimestamp;
       }
 
       if (newStatus === 'READ') {
-        recipientUpdate.readAt = eventTimestamp;
+        messageUpdate.readAt = eventTimestamp;
       }
 
       if (newStatus === 'FAILED') {
-        recipientUpdate.isActive = false;
+        messageUpdate.failedAt = eventTimestamp;
+
+        if (payload.errorCode || payload.errorMessage) {
+          messageUpdate.errorCode = payload.errorCode ?? null;
+          messageUpdate.errorMessage = payload.errorMessage ?? null;
+          messageUpdate.errorDetails = {
+            provider: 'pontaltech',
+            errorCode: payload.errorCode,
+            errorMessage: payload.errorMessage,
+          } as any;
+        }
       }
 
-      await this.prisma.campaignRecipient.update({
-        where: { id: message.recipientId },
-        data: recipientUpdate,
+      await tx.message.update({
+        where: { id: freshMessage.id },
+        data: messageUpdate,
       });
-    }
 
-    // Atualiza contadores da campanha
-    await this.updateCampaignCounters(message.campaignId, newStatus, previousStatus);
+      // Atualiza o destinatario
+      if (message.recipientId) {
+        const recipientUpdate: any = { status: newStatus };
+
+        if (newStatus === 'DELIVERED') {
+          recipientUpdate.deliveredAt = eventTimestamp;
+        }
+
+        if (newStatus === 'READ') {
+          recipientUpdate.readAt = eventTimestamp;
+        }
+
+        if (newStatus === 'FAILED') {
+          recipientUpdate.isActive = false;
+        }
+
+        await tx.campaignRecipient.update({
+          where: { id: message.recipientId },
+          data: recipientUpdate,
+        });
+      }
+
+      // Contadores com increment atômico (usa this.prisma, igual ao path Meta)
+      await this.updateCampaignCounters(message.campaignId, newStatus, prevStatus);
+    });
 
     // Marca o webhook como processado
     try {
@@ -600,7 +609,7 @@ export class WebhookService {
     }
 
     this.logger.debug(
-      `Status da mensagem RCS ${message.id}: ${previousStatus ?? 'unknown'} -> ${newStatus} (pontaltech=${rcsStatus})`,
+      `Status da mensagem RCS ${message.id}: ${message.status ?? 'unknown'} -> ${newStatus} (pontaltech=${rcsStatus})`,
     );
   }
 

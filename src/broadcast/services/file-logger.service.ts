@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -13,14 +13,29 @@ export interface WebhookLogEntry {
 }
 
 @Injectable()
-export class FileLoggerService {
+export class FileLoggerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(FileLoggerService.name);
   private readonly logsDir: string;
+  private retentionTimer?: NodeJS.Timeout;
 
   constructor() {
     // Diretório de logs na raiz do projeto
     this.logsDir = path.join(process.cwd(), 'logs', 'webhooks');
     this.ensureLogDirectory();
+  }
+
+  onModuleInit(): void {
+    // Retenção automática (antes cleanOldLogs era manual e nunca rodava).
+    const days = parseInt(process.env.WEBHOOK_LOG_RETENTION_DAYS || '30', 10);
+    this.cleanOldLogs(days);
+    this.retentionTimer = setInterval(() => this.cleanOldLogs(days), 24 * 60 * 60 * 1000);
+    this.retentionTimer.unref?.();
+  }
+
+  onModuleDestroy(): void {
+    if (this.retentionTimer) {
+      clearInterval(this.retentionTimer);
+    }
   }
 
   /**
@@ -79,15 +94,42 @@ export class FileLoggerService {
    * Formata uma linha de log no formato JSON
    */
   private formatLogLine(entry: WebhookLogEntry): string {
+    // PII: não gravamos o payload cru por padrão (contém telefones/conteúdo).
+    // Habilite WEBHOOK_LOG_PAYLOAD=true só em debug. Telefones são mascarados.
+    const includePayload = process.env.WEBHOOK_LOG_PAYLOAD === 'true';
     return JSON.stringify({
       timestamp: entry.timestamp,
       type: entry.type,
       messageId: entry.messageId,
       status: entry.status,
-      recipient: entry.recipient,
-      metadata: entry.metadata,
-      payload: entry.payload,
+      recipient: this.maskPhone(entry.recipient),
+      metadata: this.maskPii(entry.metadata),
+      payload: includePayload ? this.maskPii(entry.payload) : undefined,
     });
+  }
+
+  /** Mascara um telefone mantendo o DDI + os últimos 4 dígitos. */
+  private maskPhone(value: string): string {
+    const digits = String(value ?? '').replace(/\D/g, '');
+    if (digits.length < 6) {
+      return '***';
+    }
+    return digits.slice(0, 2) + '*'.repeat(digits.length - 6) + digits.slice(-4);
+  }
+
+  /** Mascara sequências de dígitos tipo telefone (8-15) em qualquer string do valor. */
+  private maskPii<T>(value: T): T {
+    if (value === undefined || value === null) {
+      return value;
+    }
+    try {
+      const json = JSON.stringify(value, (_key, v) =>
+        typeof v === 'string' ? v.replace(/\d{8,15}/g, (m) => this.maskPhone(m)) : v,
+      );
+      return JSON.parse(json);
+    } catch {
+      return value;
+    }
   }
 
   /**

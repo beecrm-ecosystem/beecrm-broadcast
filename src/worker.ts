@@ -27,7 +27,7 @@ async function startWorker() {
     logger.log(`   - CampaignMonitorProcessor`);
     logger.log(`   - ImportContactsProcessor`);
     logger.log(`   - WebhookProcessor`);
-    logger.log(`   - DLQ listener`);
+    logger.log(`   - DlqProcessor (broadcast-dlq)`);
     logger.log(
       `🔗 Redis: ${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || '6379'}`,
     );

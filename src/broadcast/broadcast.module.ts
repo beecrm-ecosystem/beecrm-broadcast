@@ -13,6 +13,7 @@ import { ImportService } from './services/import.service';
 import { BroadcastProcessor } from './queues/broadcast.processor';
 import { ImportContactsProcessor } from './queues/import-contacts.processor';
 import { WebhookProcessor } from './queues/webhook.processor';
+import { DlqProcessor } from './queues/dlq.processor';
 import { WebhookController } from './webhook/webhook.controller';
 import { WebhookService } from './webhook/webhook.service';
 import { WebhookQueueService } from './services/webhook-queue.service';
@@ -88,6 +89,7 @@ import { redisProvider } from './redis.provider';
     BroadcastProcessor,
     ImportContactsProcessor,
     WebhookProcessor,
+    DlqProcessor,
     WebhookService,
     WebhookQueueService,
     FileLoggerService,

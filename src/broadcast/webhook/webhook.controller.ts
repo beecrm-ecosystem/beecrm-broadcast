@@ -2,6 +2,7 @@ import { Controller, Post, Body, Logger, Get } from '@nestjs/common';
 import { ApiBody, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { WebhookQueueService } from '../services/webhook-queue.service';
 import { RcsWebhookDto } from './rcs-webhook.dto';
+import { Public } from '../auth/public.decorator';
 
 // Formato oficial do Meta WhatsApp Business API
 export interface MetaWhatsAppWebhookDto {
@@ -70,6 +71,7 @@ export interface DiogenesWebhookDto {
 }
 
 @ApiTags('Webhooks')
+@Public() // webhooks de provider (Meta/Pontaltech) — autenticação própria é card separado
 @Controller('webhook')
 export class WebhookController {
   private readonly logger = new Logger(WebhookController.name);

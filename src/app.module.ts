@@ -1,8 +1,10 @@
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { BullModule } from '@nestjs/bullmq';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { BroadcastModule } from './broadcast/broadcast.module';
+import { ApiTokenGuard } from './broadcast/auth/api-token.guard';
 
 @Module({
   imports: [
@@ -17,6 +19,11 @@ import { BroadcastModule } from './broadcast/broadcast.module';
     BroadcastModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [
+    AppService,
+    // Guard global de autenticação da REST API (fail-open quando a env não
+    // está setada — ver ApiTokenGuard). Rotas @Public() ficam de fora.
+    { provide: APP_GUARD, useClass: ApiTokenGuard },
+  ],
 })
 export class AppModule {}

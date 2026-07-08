@@ -31,6 +31,7 @@ import { CampaignMonitorProcessor } from './queues/campaign-monitor.processor';
 import { WhatsAppDispatcher } from './services/dispatchers/whatsapp.dispatcher';
 import { RcsDispatcher } from './services/dispatchers/rcs.dispatcher';
 import { ChannelDispatcherFactory } from './services/channel-dispatcher.factory';
+import { redisProvider } from './redis.provider';
 
 @Module({
   imports: [
@@ -97,6 +98,7 @@ import { ChannelDispatcherFactory } from './services/channel-dispatcher.factory'
     WhatsAppDispatcher,
     RcsDispatcher,
     ChannelDispatcherFactory,
+    redisProvider,
   ],
   exports: [BroadcastService, QueueService, ImportService, MetricsService, WebhookQueueService],
 })

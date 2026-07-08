@@ -1,8 +1,10 @@
 import { HttpService } from '@nestjs/axios';
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Campaign, CampaignStatus, MessageStatus } from '@prisma/client';
 import { createHmac } from 'crypto';
 import { firstValueFrom } from 'rxjs';
+import Redis from 'ioredis';
+import { REDIS_CLIENT } from '../redis.provider';
 
 interface UpdateStatusOptions {
   status?: CampaignStatus;
@@ -60,10 +62,36 @@ export interface BroadcastMessageSummary {
 export class CampaignWebhookService {
   private readonly logger = new Logger(CampaignWebhookService.name);
   private readonly endpointPath = '/api/v1/webhooks/campaign-webhook';
-  // Cache highest counters per broadcast so follow-up webhooks never regress delivered/read totals.
-  private readonly summaryHistory = new Map<string, BroadcastSummarySnapshot>();
+  // High-water-mark dos contadores por broadcast no Redis (antes era um Map em
+  // memória, que se perdia em restart e não era compartilhado entre pods —
+  // permitindo que delivered/read regredissem). Script Lua aplica o max-merge +
+  // clamp de forma atômica; TTL de 7 dias.
+  private static readonly SUMMARY_LUA = `
+local key = KEYS[1]
+local pt = tonumber(redis.call('HGET', key, 'total')) or 0
+local ps = tonumber(redis.call('HGET', key, 'sent')) or 0
+local pd = tonumber(redis.call('HGET', key, 'delivered')) or 0
+local pr = tonumber(redis.call('HGET', key, 'read')) or 0
+local pf = tonumber(redis.call('HGET', key, 'failed')) or 0
+local total = math.max(pt, tonumber(ARGV[1]))
+local sent = math.max(ps, tonumber(ARGV[2]))
+local delivered = math.max(pd, tonumber(ARGV[3]))
+local read = math.max(pr, tonumber(ARGV[4]))
+local failed = math.max(pf, tonumber(ARGV[5]))
+total = math.max(total, 0)
+sent = math.min(math.max(sent, 0), total)
+failed = math.min(math.max(failed, 0), total)
+delivered = math.max(math.min(delivered, sent), 0)
+read = math.max(math.min(read, delivered), 0)
+redis.call('HSET', key, 'total', total, 'sent', sent, 'delivered', delivered, 'read', read, 'failed', failed)
+redis.call('EXPIRE', key, 604800)
+return {total, sent, delivered, read, failed}
+`;
 
-  constructor(private readonly httpService: HttpService) {}
+  constructor(
+    private readonly httpService: HttpService,
+    @Inject(REDIS_CLIENT) private readonly redis: Redis,
+  ) {}
 
   async sendUpdateStatus(campaign: Campaign, options: UpdateStatusOptions = {}): Promise<void> {
     const baseUrl = this.resolveBaseUrl(campaign.channel);
@@ -136,7 +164,7 @@ export class CampaignWebhookService {
     const readContacts = Math.min(Math.max(readContactsRaw, 0), deliveredContacts);
 
     const broadcastId = this.resolveBroadcastId(campaign);
-    const normalizedCounters = this.applySummaryHistory(broadcastId, {
+    const normalizedCounters = await this.applySummaryHistory(broadcastId, {
       totalContacts,
       sentContacts,
       deliveredContacts,
@@ -352,36 +380,55 @@ export class CampaignWebhookService {
     return map[status];
   }
 
-  private applySummaryHistory(
+  private async applySummaryHistory(
     broadcastId: string,
     counters: BroadcastSummarySnapshot,
-  ): BroadcastSummarySnapshot {
-    const previous = this.summaryHistory.get(broadcastId);
-    const merged: BroadcastSummarySnapshot = {
-      totalContacts: counters.totalContacts,
-      sentContacts: counters.sentContacts,
-      deliveredContacts: counters.deliveredContacts,
-      readContacts: counters.readContacts,
-      failedContacts: counters.failedContacts,
-    };
+  ): Promise<BroadcastSummarySnapshot> {
+    const key = `broadcast:summary:${broadcastId}`;
+    try {
+      const res = (await this.redis.eval(
+        CampaignWebhookService.SUMMARY_LUA,
+        1,
+        key,
+        String(counters.totalContacts),
+        String(counters.sentContacts),
+        String(counters.deliveredContacts),
+        String(counters.readContacts),
+        String(counters.failedContacts),
+      )) as [number, number, number, number, number];
 
-    if (previous) {
-      merged.totalContacts = Math.max(previous.totalContacts, merged.totalContacts);
-      merged.sentContacts = Math.max(previous.sentContacts, merged.sentContacts);
-      merged.deliveredContacts = Math.max(previous.deliveredContacts, merged.deliveredContacts);
-      merged.readContacts = Math.max(previous.readContacts, merged.readContacts);
-      merged.failedContacts = Math.max(previous.failedContacts, merged.failedContacts);
+      return {
+        totalContacts: Number(res[0]),
+        sentContacts: Number(res[1]),
+        deliveredContacts: Number(res[2]),
+        readContacts: Number(res[3]),
+        failedContacts: Number(res[4]),
+      };
+    } catch (error) {
+      // Redis indisponível: não bloqueia o webhook — usa os contadores locais
+      // clampados (best-effort, sem o high-water-mark cross-pod nesta chamada).
+      this.logger.warn(
+        `Falha ao aplicar summaryHistory no Redis (${broadcastId}) — usando contadores locais: ${
+          (error as Error)?.message ?? error
+        }`,
+      );
+      return this.clampSnapshot(counters);
     }
+  }
 
-    merged.totalContacts = Math.max(merged.totalContacts, 0);
-    merged.sentContacts = Math.min(Math.max(merged.sentContacts, 0), merged.totalContacts);
-    merged.failedContacts = Math.min(Math.max(merged.failedContacts, 0), merged.totalContacts);
-    merged.deliveredContacts = Math.min(merged.deliveredContacts, merged.sentContacts);
-    merged.deliveredContacts = Math.max(merged.deliveredContacts, 0);
-    merged.readContacts = Math.min(merged.readContacts, merged.deliveredContacts);
-    merged.readContacts = Math.max(merged.readContacts, 0);
-
-    this.summaryHistory.set(broadcastId, merged);
-    return merged;
+  /** Mesmo clamp do script Lua, para o fallback quando o Redis falha. */
+  private clampSnapshot(c: BroadcastSummarySnapshot): BroadcastSummarySnapshot {
+    const total = Math.max(c.totalContacts, 0);
+    const sent = Math.min(Math.max(c.sentContacts, 0), total);
+    const failed = Math.min(Math.max(c.failedContacts, 0), total);
+    const delivered = Math.max(Math.min(c.deliveredContacts, sent), 0);
+    const read = Math.max(Math.min(c.readContacts, delivered), 0);
+    return {
+      totalContacts: total,
+      sentContacts: sent,
+      deliveredContacts: delivered,
+      readContacts: read,
+      failedContacts: failed,
+    };
   }
 }

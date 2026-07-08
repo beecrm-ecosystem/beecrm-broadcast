@@ -20,7 +20,8 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "prisma:seed": "ts-node prisma/seed.ts",
     "requeue:campaign": "node scripts/requeue-campaign.js",
-    "analyze:errors": "node scripts/analyze-campaign-errors.js"
+    "analyze:errors": "node scripts/analyze-campaign-errors.js",
+    "export:openapi": "ts-node -r tsconfig-paths/register scripts/export-openapi.ts"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"

@@ -586,7 +586,11 @@ export class BroadcastService {
       },
     });
 
-    this.logger.log(`Campanha cancelada: ${id}`);
+    // Drena a fila: remove jobs waiting/delayed desta campanha para parar os
+    // envios prontamente (o guard de status no processor cobre os já ativos).
+    const removed = await this.queueService.removeCampaignJobs(id);
+
+    this.logger.log(`Campanha cancelada: ${id} | jobs removidos=${removed.removed}`);
     await this.campaignWebhook.sendUpdateStatus(updated);
     await this.campaignWebhook.sendBroadcastSummary(updated, {
       status: 'CANCELED',

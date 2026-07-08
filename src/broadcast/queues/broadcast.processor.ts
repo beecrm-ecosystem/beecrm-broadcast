@@ -82,6 +82,31 @@ export class BroadcastProcessor extends WorkerHost {
       templateLanguage,
     } = job.data;
 
+    // Guard de status: pause/cancel mudam só o status no banco e não drenam a
+    // fila, então checamos a campanha antes de enviar. CANCELED/COMPLETED/FAILED
+    // → descarta o job (não envia). PAUSED → re-atrasa (mantém o job vivo para
+    // quando a campanha for retomada). Sem isso, jobs já enfileirados continuam
+    // disparando após pausar/cancelar.
+    const campaignState = await this.prisma.campaign.findUnique({
+      where: { id: campaignId },
+      select: { status: true },
+    });
+    if (
+      !campaignState ||
+      ['CANCELED', 'COMPLETED', 'FAILED'].includes(campaignState.status)
+    ) {
+      this.logger.log(
+        `⏭️ Campanha ${campaignId} em ${campaignState?.status ?? 'inexistente'} — job descartado (sem envio)`,
+      );
+      return { success: false, reason: 'campaign_not_active', skipped: true };
+    }
+    if (campaignState.status === 'PAUSED') {
+      const delayMs = 60000; // re-checa em 1min; retoma sozinho quando voltar a PROCESSING
+      this.logger.log(`⏸️ Campanha ${campaignId} pausada — reagendando job em ${delayMs / 1000}s`);
+      await job.moveToDelayed(Date.now() + delayMs);
+      return { success: false, reason: 'campaign_paused', rescheduled: true };
+    }
+
     // Verificar time window antes de processar
     const timeWindowCheck = await this.checkTimeWindow(
       campaignId,

@@ -48,3 +48,14 @@ X-Bee-Signature: hash_hmac('sha256', "<timestamp>.<raw_body>", CAMPAIGN_WEBHOOK_
 
 Janela de tolerância: ±300s. Eventos: `broadcast:statusUpdate`, `broadcast:messageResults`,
 `update_status` (legado). Detalhe dos payloads no documento canônico do CRM.
+
+### Destino do webhook (`{CRM}`)
+
+1. **`metadata.webhookUrl`** do create da campanha: URL completa gerada pelo CRM
+   (`Util::campaignWebhookUrl()`), no formato
+   `https://api.beecrm.io/api/v1/t/{tenant}/webhooks/campaign-webhook`. Só vale
+   com HTTPS e host listado em `CRM_WEBHOOK_ALLOWED_HOSTS`; sem a lista, é recusada.
+2. **Legado:** sem `webhookUrl` (ou com ela recusada), a base sai do campo `channel`
+   (`<canal>-<domínio do tenant>`) + `/api/v1/webhooks/campaign-webhook`. Na URL
+   única o domínio do tenant não existe no DNS, e campanhas RCS (`channel: "rcs"`)
+   não têm domínio: nesses casos só a opção 1 entrega.

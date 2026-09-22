@@ -94,8 +94,8 @@ return {total, sent, delivered, read, failed}
   ) {}
 
   async sendUpdateStatus(campaign: Campaign, options: UpdateStatusOptions = {}): Promise<void> {
-    const baseUrl = this.resolveBaseUrl(campaign.channel);
-    if (!baseUrl) {
+    const url = this.resolveWebhookUrl(campaign);
+    if (!url) {
       return;
     }
 
@@ -129,15 +129,15 @@ return {total, sent, delivered, read, failed}
       `📤 Enviando webhook update_status (campaign=${campaign.id}, status=${resolvedStatus}, code=${statusCode})`,
     );
     this.logger.debug(`Payload do webhook: ${JSON.stringify(payload, null, 2)}`);
-    await this.executeRequest(baseUrl, secret, payload, 'update_status');
+    await this.executeRequest(url, secret, payload, 'update_status');
   }
 
   async sendBroadcastSummary(
     campaign: Campaign,
     options: BroadcastSummaryOptions = {},
   ): Promise<void> {
-    const baseUrl = this.resolveBaseUrl(campaign.channel);
-    if (!baseUrl) {
+    const url = this.resolveWebhookUrl(campaign);
+    if (!url) {
       return;
     }
 
@@ -229,15 +229,15 @@ return {total, sent, delivered, read, failed}
       );
     }
     this.logger.debug(`Payload do webhook: ${JSON.stringify(payload, null, 2)}`);
-    await this.executeRequest(baseUrl, secret, payload, 'broadcast:statusUpdate');
+    await this.executeRequest(url, secret, payload, 'broadcast:statusUpdate');
   }
 
   async sendMessageResults(
     campaign: Campaign,
     messages: MessageResultItem[],
   ): Promise<void> {
-    const baseUrl = this.resolveBaseUrl(campaign.channel);
-    if (!baseUrl) {
+    const url = this.resolveWebhookUrl(campaign);
+    if (!url) {
       return;
     }
 
@@ -263,7 +263,7 @@ return {total, sent, delivered, read, failed}
       `📤 Enviando webhook broadcast:messageResults (campaign=${campaign.id}, messages=${messages.length})`,
     );
     this.logger.debug(`Payload do webhook: ${JSON.stringify(payload, null, 2)}`);
-    await this.executeRequest(baseUrl, secret, payload, 'broadcast:messageResults');
+    await this.executeRequest(url, secret, payload, 'broadcast:messageResults');
   }
 
   /**
@@ -278,9 +278,8 @@ return {total, sent, delivered, read, failed}
    * enviamos a string como data, com Content-Type application/json — assim
    * axios nao re-serializa por baixo do pano.
    */
-  private async executeRequest(baseUrl: string, secret: string, payload: any, eventName: string) {
+  private async executeRequest(url: string, secret: string, payload: any, eventName: string) {
     try {
-      const url = `${baseUrl.replace(/\/$/, '')}${this.endpointPath}`;
       const rawBody = JSON.stringify(payload);
       const timestamp = Math.floor(Date.now() / 1000).toString();
       const signature = createHmac('sha256', secret)
@@ -308,6 +307,59 @@ return {total, sent, delivered, read, failed}
         this.logger.debug(`Payload de erro: ${JSON.stringify(data)}`);
       }
     }
+  }
+
+  /**
+   * Destino do webhook. Preferencia: metadata.webhookUrl, que o CRM manda
+   * pronto no create (na URL unica o dominio do tenant nao existe no DNS, e o
+   * RCS nem tem dominio no channel). Sem ele, ou com ele recusado, segue o
+   * calculo antigo pelo channel — campanhas antigas continuam iguais.
+   */
+  private resolveWebhookUrl(campaign: Campaign): string | null {
+    const explicit = this.explicitWebhookUrl(campaign);
+    if (explicit) {
+      return explicit;
+    }
+
+    const baseUrl = this.resolveBaseUrl(campaign.channel);
+    return baseUrl ? `${baseUrl.replace(/\/$/, '')}${this.endpointPath}` : null;
+  }
+
+  /**
+   * metadata.webhookUrl so vale com HTTPS e host em CRM_WEBHOOK_ALLOWED_HOSTS.
+   * Sem a lista, recusa (fail closed): a API aceita create sem token quando
+   * BROADCAST_SERVICE_TOKEN falta, e uma URL livre faria este servico mandar
+   * payload assinado para qualquer host (SSRF + replay da assinatura).
+   */
+  private explicitWebhookUrl(campaign: Campaign): string | null {
+    const metadata = campaign.metadata as Record<string, any> | null;
+    const raw = metadata && typeof metadata === 'object' ? metadata.webhookUrl : null;
+    if (typeof raw !== 'string' || raw.trim() === '') {
+      return null;
+    }
+
+    let parsed: URL;
+    try {
+      parsed = new URL(raw.trim());
+    } catch {
+      this.logger.warn(`metadata.webhookUrl invalido na campanha ${campaign.id}; usando o channel.`);
+      return null;
+    }
+
+    const allowedHosts = (process.env.CRM_WEBHOOK_ALLOWED_HOSTS || '')
+      .split(',')
+      .map((host) => host.trim().toLowerCase())
+      .filter(Boolean);
+
+    if (parsed.protocol !== 'https:' || !allowedHosts.includes(parsed.hostname.toLowerCase())) {
+      this.logger.warn(
+        `metadata.webhookUrl recusado na campanha ${campaign.id} (host ${parsed.hostname}, ` +
+          `protocolo ${parsed.protocol}); confira CRM_WEBHOOK_ALLOWED_HOSTS. Usando o channel.`,
+      );
+      return null;
+    }
+
+    return parsed.toString();
   }
 
   private resolveBaseUrl(channel?: string): string | null {

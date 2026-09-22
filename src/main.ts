@@ -3,6 +3,7 @@ import { AppModule } from './app.module';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { join } from 'path';
+import { json, urlencoded } from 'express';
 import { AllExceptionsFilter } from './broadcast/filters/http-exception.filter';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
@@ -15,8 +16,16 @@ async function bootstrap() {
 
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: logLevels,
+    // Desabilita o body-parser default (limite 100KB) para reconfigurar com limite maior abaixo.
+    // Campanhas rotation enviam lotes de contatos com o template embutido por contato (metadata.templateOverride),
+    // o que estoura 100KB e retorna 413 PayloadTooLargeError — lotes eram silenciosamente perdidos.
+    bodyParser: false,
   });
   const logger = new Logger('Bootstrap');
+
+  // Body-parser com limite ampliado (default do Express e 100KB).
+  app.use(json({ limit: '25mb' }));
+  app.use(urlencoded({ extended: true, limit: '25mb' }));
 
   // Define prefixo global para as rotas da API
   app.setGlobalPrefix('api');

@@ -50,6 +50,7 @@ function build(sendMessage: jest.Mock, attempts = 1) {
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
   };
+  prisma.$transaction = jest.fn(async (fn: (tx: any) => Promise<any>) => fn(prisma));
   const webhook = {
     sendMessageResults: jest.fn().mockResolvedValue(undefined),
     sendBroadcastSummary: jest.fn().mockResolvedValue(undefined),

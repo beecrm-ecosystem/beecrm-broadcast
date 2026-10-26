@@ -166,6 +166,7 @@ export class BroadcastProcessor extends WorkerHost {
         status: 'SENT',
         sentAt: new Date().toISOString(),
         errorMessage: null,
+        errorCode: null,
       });
 
       // Envia webhook de progresso (throttled)
@@ -219,6 +220,9 @@ export class BroadcastProcessor extends WorkerHost {
         metaError?.httpStatusCode ?? error.response?.status ?? 'UNKNOWN';
       const errorCode = metaError ? String(metaError.metaCode) : String(httpStatusCode);
       const errorMessage = metaError?.metaMessage ?? error.message;
+      // Codigo que viaja no messageResults: o CRM so reconhece string de
+      // digitos (ctype_digit), entao o 'UNKNOWN' de falha sem HTTP vira null.
+      const resultErrorCode = /^\d+$/.test(errorCode) ? errorCode : null;
 
       const failureMetadata: Record<string, any> = {
         httpStatusCode,
@@ -276,6 +280,7 @@ export class BroadcastProcessor extends WorkerHost {
           status: 'FAILED',
           sentAt: null,
           errorMessage,
+          errorCode: resultErrorCode,
         });
       }
 

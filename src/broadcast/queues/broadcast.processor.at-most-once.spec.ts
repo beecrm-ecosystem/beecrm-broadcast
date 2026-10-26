@@ -69,12 +69,12 @@ function makeWorld(
   }
   const messages: any[] = [];
   let seq = 0;
-  // Transacao simulada: Message criada dentro dela so fica visivel ao webhook
-  // no commit; fora dela, na hora (como o Postgres em READ COMMITTED).
-  let inTx = false;
+  // Transacao simulada: Message gravada pelo cliente DA TRANSACAO so fica
+  // visivel ao webhook no commit; gravada pelo cliente global (mesmo durante
+  // a transacao) fica visivel na hora, como no Postgres em READ COMMITTED.
   const pendingVisible: any[] = [];
-  const becameVisible = (row: any) => {
-    if (inTx) pendingVisible.push(row);
+  const becameVisible = (row: any, viaTx?: { tx: true }) => {
+    if (viaTx?.tx) pendingVisible.push(row);
     else opts.onMessageVisible?.(row);
   };
 
@@ -127,32 +127,39 @@ function makeWorld(
       findMany: jest.fn(async () => []),
     },
     message: {
-      create: jest.fn(async ({ data }: any) => {
+      create: jest.fn(async ({ data }: any, viaTx?: { tx: true }) => {
         if (data.externalId && messages.some((m) => m.externalId === data.externalId)) {
           throw new Error('P2002 unique externalId');
         }
         const row = { id: `msg-${++seq}`, ...data };
         messages.push(row);
-        if (row.externalId) becameVisible(row);
+        if (row.externalId) becameVisible(row, viaTx);
         return row;
       }),
-      upsert: jest.fn(async ({ where, create }: any) => {
+      upsert: jest.fn(async ({ where, create }: any, viaTx?: { tx: true }) => {
         const existing = messages.find((m) => m.externalId === where.externalId);
         if (existing) return existing;
         const row = { id: `msg-${++seq}`, ...create };
         messages.push(row);
-        becameVisible(row);
+        becameVisible(row, viaTx);
         return row;
       }),
     },
   };
+  // Cliente da transacao: as escritas de Message passam pelos mesmos jest.fn
+  // (os testes podem fazer mockRejectedValueOnce neles), marcadas como "da tx".
+  const txClient: any = {
+    campaignRecipient: prisma.campaignRecipient,
+    message: {
+      create: (args: any) => prisma.message.create(args, { tx: true }),
+      upsert: (args: any) => prisma.message.upsert(args, { tx: true }),
+    },
+  };
   // Sem rollback (os testes que falham na transacao falham antes de gravar).
-  prisma.$transaction = jest.fn(async (fn: (tx: any) => Promise<any>) => {
-    inTx = true;
+  prisma.$transaction = jest.fn(async (fn: (tx: any) => Promise<any>, _options?: any) => {
     try {
-      return await fn(prisma);
+      return await fn(txClient);
     } finally {
-      inTx = false;
       pendingVisible.splice(0).forEach((row) => opts.onMessageVisible?.(row));
     }
   });
@@ -288,6 +295,18 @@ describe('BC-01 — no maximo um envio por destinatario', () => {
     expect(w.campaign.status).toBe('COMPLETED');
     expect(w.recipients.get('rcp-A')!.status).toBe('DELIVERED');
     expect(w.sentResults()).toHaveLength(1);
+  });
+
+  it('waits up to 10s for a pool connection before giving up on the acceptance write', async () => {
+    const w = makeWorld({ totalRecipients: 5 });
+
+    await run(w.processor, makeJob('rcp-A', '5500000000001', 0));
+
+    // maxWait padrao do Prisma (2s) estoura com 100 jobs por processo no pool.
+    expect(w.prisma.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ maxWait: 10_000, timeout: 10_000 }),
+    );
   });
 
   it('a failed acceptance write leaves no Message behind and is not resent nor counted twice', async () => {

@@ -51,6 +51,13 @@ function isLegacyIntermediateFailure(
   );
 }
 
+/**
+ * Transacao do aceite: o maxWait padrao do Prisma (2s para obter conexao)
+ * estoura com 100 jobs por processo disputando o pool e vira "ACEITE SEM
+ * REGISTRO". 10s para conseguir a conexao e 10s para os 2 comandos.
+ */
+const ACCEPTANCE_TX_OPTIONS = { maxWait: 10_000, timeout: 10_000 };
+
 const FINAL_EXCEPT_FAILED = FINAL_RECIPIENT_STATUSES.filter((s) => s !== 'FAILED');
 
 export interface SendMessageJob {
@@ -300,7 +307,7 @@ export class BroadcastProcessor extends WorkerHost {
             data: { status: 'SENT', sentAt },
           });
           return { id, transitioned: count === 1 };
-        }),
+        }, ACCEPTANCE_TX_OPTIONS),
       );
       messageId = outcome.id;
       transitioned = outcome.transitioned;

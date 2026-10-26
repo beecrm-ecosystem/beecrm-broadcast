@@ -84,6 +84,7 @@ function makeWorld(opts: { totalRecipients?: number; recipients?: string[] } = {
         if (!r) return null;
         return {
           status: r.status,
+          metadata: r.metadata ?? null,
           messages: messages
             .filter((m) => m.recipientId === r.id && m.externalId)
             .slice(0, 1)
@@ -296,7 +297,57 @@ describe('BC-01 — no maximo um envio por destinatario', () => {
     await Promise.all([pA, pB]);
 
     expect(w.recipients.get('rcp-A')!.status).toBe('FAILED');
+    expect(w.recipients.get('rcp-A')!.metadata).toMatchObject({ finalFailure: true });
     expect(w.campaign.failedCount).toBe(1);
+  });
+});
+
+describe('BC-01 — retry em voo do codigo anterior (compatibilidade de deploy)', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  // O catch antigo gravava FAILED ja na tentativa intermediaria, com attemptNumber.
+  const legacyIntermediate = { status: 'FAILED', metadata: { attemptNumber: 0, errorCode: '500' } };
+
+  it('retries a recipient left FAILED by an intermediate attempt of the previous code', async () => {
+    const w = makeWorld({ totalRecipients: 5 });
+    Object.assign(w.recipients.get('rcp-A')!, legacyIntermediate);
+
+    const result = await run(w.processor, makeJob('rcp-A', '5500000000001', 1));
+
+    expect(result).toMatchObject({ success: true });
+    expect(w.dispatcher.sendMessage).toHaveBeenCalledTimes(1);
+    expect(w.recipients.get('rcp-A')!.status).toBe('SENT');
+    expect(w.campaign.sentCount).toBe(1);
+  });
+
+  it('counts the legacy recipient as failed when the retry also fails for good', async () => {
+    const w = makeWorld({ totalRecipients: 5 });
+    Object.assign(w.recipients.get('rcp-A')!, legacyIntermediate);
+    w.dispatcher.sendMessage.mockRejectedValue(new Error('timeout de rede'));
+
+    await run(w.processor, makeJob('rcp-A', '5500000000001', 2)); // ultima tentativa
+
+    expect(w.recipients.get('rcp-A')!.metadata).toMatchObject({ finalFailure: true });
+    expect(w.campaign.failedCount).toBe(1);
+  });
+
+  it.each([
+    [
+      'final failure of this code',
+      { status: 'FAILED', metadata: { attemptNumber: 0, finalFailure: true } },
+      1,
+    ],
+    ['FAILED from the provider webhook', { status: 'FAILED', metadata: null }, 1],
+    ['legacy FAILED seen by a first attempt', legacyIntermediate, 0],
+  ])('does not resend for %s', async (_label, state, attemptsMade) => {
+    const w = makeWorld({ totalRecipients: 5 });
+    Object.assign(w.recipients.get('rcp-A')!, state);
+
+    const result = await run(w.processor, makeJob('rcp-A', '5500000000001', attemptsMade));
+
+    expect(result).toMatchObject({ skipped: true, reason: 'recipient_already_processed' });
+    expect(w.dispatcher.sendMessage).not.toHaveBeenCalled();
   });
 });
 

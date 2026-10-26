@@ -27,6 +27,32 @@ const FINAL_RECIPIENT_STATUSES: MessageStatus[] = [
   'REJECTED',
 ];
 
+/**
+ * Compatibilidade de deploy: o codigo anterior gravava o recipient FAILED ja
+ * na tentativa intermediaria (antes do retry) e so contava a falha na ultima.
+ * Um retry em voo na hora do deploy encontraria esse FAILED "provisorio" e, se
+ * fosse descartado, o destinatario nao seria contado e a campanha nunca
+ * fecharia. A falha final deste codigo leva `finalFailure: true`; FAILED sem a
+ * marca, gravado pelo catch antigo (attemptNumber de uma tentativa anterior a
+ * deste retry), e tratado como pendente. FAILED do webhook do provedor nao tem
+ * attemptNumber e continua bloqueando.
+ */
+function isLegacyIntermediateFailure(
+  status: MessageStatus,
+  metadata: unknown,
+  attemptsMade: number,
+): boolean {
+  if (status !== 'FAILED' || attemptsMade <= 0) return false;
+  const meta = metadata && typeof metadata === 'object' ? (metadata as Record<string, any>) : {};
+  return (
+    meta.finalFailure !== true &&
+    typeof meta.attemptNumber === 'number' &&
+    meta.attemptNumber < attemptsMade
+  );
+}
+
+const FINAL_EXCEPT_FAILED = FINAL_RECIPIENT_STATUSES.filter((s) => s !== 'FAILED');
+
 export interface SendMessageJob {
   campaignId: string;
   recipientId: string;
@@ -148,6 +174,7 @@ export class BroadcastProcessor extends WorkerHost {
       where: { id: recipientId },
       select: {
         status: true,
+        metadata: true,
         messages: {
           where: { externalId: { not: null } },
           select: { id: true, externalId: true },
@@ -159,7 +186,20 @@ export class BroadcastProcessor extends WorkerHost {
       this.logger.warn(`⏭️ Destinatario ${recipientId} inexistente — job descartado (sem envio)`);
       return { success: false, reason: 'recipient_not_found', skipped: true };
     }
-    if (FINAL_RECIPIENT_STATUSES.includes(recipientState.status)) {
+    const legacyFailure = isLegacyIntermediateFailure(
+      recipientState.status,
+      recipientState.metadata,
+      job.attemptsMade,
+    );
+    // Estados que bloqueiam a transicao deste job (ver isLegacyIntermediateFailure).
+    const blocked = legacyFailure ? FINAL_EXCEPT_FAILED : FINAL_RECIPIENT_STATUSES;
+    if (legacyFailure) {
+      this.logger.warn(
+        `↩️ Recipient ${recipientId} em FAILED de tentativa intermediaria (codigo anterior) — ` +
+          `seguindo com o retry`,
+      );
+    }
+    if (blocked.includes(recipientState.status)) {
       this.logger.warn(
         `⏭️ Destinatario ${recipientId} ja em ${recipientState.status} — job descartado (sem reenvio)`,
       );
@@ -175,6 +215,7 @@ export class BroadcastProcessor extends WorkerHost {
         externalId: acceptedMessage.externalId,
         messageId: acceptedMessage.id,
         reconciled: true,
+        blocked,
       });
     }
 
@@ -186,7 +227,7 @@ export class BroadcastProcessor extends WorkerHost {
       // Envia via dispatcher (WhatsApp → Diogenes, RCS → Pontaltech)
       result = await dispatcher.sendMessage(job.data);
     } catch (error) {
-      return this.handleSendFailure(job, error);
+      return this.handleSendFailure(job, error, blocked);
     }
 
     // Daqui em diante o provedor ACEITOU: nenhum erro pode virar FAILED nem
@@ -194,6 +235,7 @@ export class BroadcastProcessor extends WorkerHost {
     return this.recordAcceptedSend(job, {
       externalId: result.externalId ?? null,
       metadata: result.metadata,
+      blocked,
     });
   }
 
@@ -211,6 +253,7 @@ export class BroadcastProcessor extends WorkerHost {
       metadata?: Record<string, any>;
       messageId?: string;
       reconciled?: boolean;
+      blocked?: MessageStatus[];
     },
   ): Promise<any> {
     const { campaignId, recipientId, recipientPhone, recipientName, templateData, templateName } =
@@ -250,7 +293,10 @@ export class BroadcastProcessor extends WorkerHost {
     let transitioned = false;
     try {
       const { count } = await this.prisma.campaignRecipient.updateMany({
-        where: { id: recipientId, status: { notIn: FINAL_RECIPIENT_STATUSES } },
+        where: {
+          id: recipientId,
+          status: { notIn: accepted.blocked ?? FINAL_RECIPIENT_STATUSES },
+        },
         data: { status: 'SENT', sentAt },
       });
       transitioned = count === 1;
@@ -335,7 +381,11 @@ export class BroadcastProcessor extends WorkerHost {
    * final (permanente ou ultima tentativa): marca o recipient FAILED por update
    * condicional e so entao conta a falha e manda o item ao CRM.
    */
-  private async handleSendFailure(job: Job<SendMessageJob>, error: any): Promise<any> {
+  private async handleSendFailure(
+    job: Job<SendMessageJob>,
+    error: any,
+    blocked: MessageStatus[] = FINAL_RECIPIENT_STATUSES,
+  ): Promise<any> {
     const { campaignId, recipientId, recipientPhone, recipientName, templateData, templateName } =
       job.data;
     this.logger.error(`Erro ao processar envio para ${recipientPhone}: ${error.message}`);
@@ -418,7 +468,7 @@ export class BroadcastProcessor extends WorkerHost {
     let transitioned = false;
     try {
       const { count } = await this.prisma.campaignRecipient.updateMany({
-        where: { id: recipientId, status: { notIn: FINAL_RECIPIENT_STATUSES } },
+        where: { id: recipientId, status: { notIn: blocked } },
         data: {
           status: 'FAILED',
           metadata: {
@@ -427,6 +477,7 @@ export class BroadcastProcessor extends WorkerHost {
             errorCode,
             failedAt: new Date(),
             attemptNumber: job.attemptsMade,
+            finalFailure: true,
           },
         },
       });

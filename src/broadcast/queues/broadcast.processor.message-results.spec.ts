@@ -62,7 +62,6 @@ function build(sendMessage: jest.Mock, attempts = 1) {
     { getDispatcher: () => ({ sendMessage }) } as any,
     webhook as any,
     dlq as any,
-    {} as any,
   );
   const job: any = {
     id: 'j1',

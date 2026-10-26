@@ -21,7 +21,7 @@ import { join } from 'path';
 import { AppModule } from '../src/app.module';
 
 async function main() {
-  const app = await NestFactory.create(AppModule, {
+  const app = await NestFactory.create(AppModule.forApi(), {
     logger: ['error', 'warn'],
     abortOnError: false,
   });

@@ -14,6 +14,18 @@ interface EnqueueCampaignOptions {
 export class QueueService {
   private readonly logger = new Logger(QueueService.name);
 
+  /**
+   * Chave de deduplicacao do job de envio (BC-01): um destinatario tem no
+   * maximo um job vivo (waiting/delayed/active) na fila. Enfileirar de novo
+   * enquanto ele existe (requeue concorrente, monitor + start) vira no-op no
+   * BullMQ. A chave some quando o job termina (completed/failed) ou e removido,
+   * entao o requeue de quem ficou preso continua funcionando — o que um jobId
+   * fixo impediria por ate 24h (removeOnFail mantem o job falho com o mesmo id).
+   */
+  static sendDeduplicationId(campaignId: string, recipientId: string): string {
+    return `send-${campaignId}-${recipientId}`;
+  }
+
   constructor(
     @InjectQueue('broadcast-queue') private broadcastQueue: Queue,
     private readonly prisma: PrismaService,
@@ -127,6 +139,7 @@ export class QueueService {
         data: jobData,
         opts: {
           delay,
+          deduplication: { id: QueueService.sendDeduplicationId(campaign.id, recipient.id) },
           attempts: 3, // 1 tentativa + 2 retries curtos
           backoff: {
             type: 'exponential',
@@ -410,6 +423,7 @@ export class QueueService {
         data: jobData,
         opts: {
           delay,
+          deduplication: { id: QueueService.sendDeduplicationId(campaign.id, recipient.id) },
           attempts: 3,
           backoff: { type: 'exponential' as const, delay: 1000 },
           removeOnComplete: { age: 3600, count: 1000 },

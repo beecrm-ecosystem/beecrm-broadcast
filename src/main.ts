@@ -3,6 +3,10 @@ import { AppModule } from './app.module';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { join } from 'path';
+import {
+  PROVIDER_WEBHOOK_PATH,
+  providerWebhookBodyParser,
+} from './broadcast/webhook/provider-webhook-body';
 import { json, urlencoded } from 'express';
 import { AllExceptionsFilter } from './broadcast/filters/http-exception.filter';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
@@ -22,6 +26,9 @@ async function bootstrap() {
     bodyParser: false,
   });
   const logger = new Logger('Bootstrap');
+
+  // Webhooks de provedor: corpo cru para conferir a assinatura da Meta (ver ProviderWebhookGuard).
+  app.use(PROVIDER_WEBHOOK_PATH, providerWebhookBodyParser());
 
   // Body-parser com limite ampliado (default do Express e 100KB).
   app.use(json({ limit: '25mb' }));

@@ -1,8 +1,9 @@
-import { Controller, Post, Body, Logger, Get } from '@nestjs/common';
+import { Controller, Post, Body, Logger, Get, UseGuards } from '@nestjs/common';
 import { ApiBody, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { WebhookQueueService } from '../services/webhook-queue.service';
 import { RcsWebhookDto } from './rcs-webhook.dto';
 import { Public } from '../auth/public.decorator';
+import { ProviderWebhookGuard } from './provider-webhook.guard';
 
 // Formato oficial do Meta WhatsApp Business API
 export interface MetaWhatsAppWebhookDto {
@@ -70,8 +71,15 @@ export interface DiogenesWebhookDto {
   apikey?: string;
 }
 
+/**
+ * Webhooks de provedor (Meta/Diogenes/Pontaltech).
+ *
+ * As rotas de provedor saem do ApiTokenGuard (`@Public()`, o provedor nao tem o Bearer do CRM)
+ * e passam pelo ProviderWebhookGuard: token compartilhado (header `X-Webhook-Token` ou ultimo
+ * segmento da URL) ou, no `campaign-status`, `X-Hub-Signature-256` da Meta. `queue/stats` e
+ * `test` NAO sao publicas: ficam atras do ApiTokenGuard como o resto da API.
+ */
 @ApiTags('Webhooks')
-@Public() // webhooks de provider (Meta/Pontaltech) — autenticação própria é card separado
 @Controller('webhook')
 export class WebhookController {
   private readonly logger = new Logger(WebhookController.name);
@@ -84,7 +92,9 @@ export class WebhookController {
    *
    * Os webhooks são adicionados a uma fila para processamento assíncrono
    */
-  @Post('campaign-status')
+  @Post(['campaign-status', 'campaign-status/:token'])
+  @Public()
+  @UseGuards(ProviderWebhookGuard)
   @ApiOperation({ summary: 'Recebe webhooks do Meta WhatsApp Business API' })
   @ApiBody({
     required: true,
@@ -175,7 +185,9 @@ export class WebhookController {
    * Endpoint legado para compatibilidade com Diogenes
    * Os webhooks são adicionados a uma fila para processamento assíncrono
    */
-  @Post('diogenes')
+  @Post(['diogenes', 'diogenes/:token'])
+  @Public()
+  @UseGuards(ProviderWebhookGuard)
   @ApiOperation({ summary: 'Recebe webhooks no formato legado Diogenes' })
   @ApiBody({
     required: true,
@@ -228,7 +240,9 @@ export class WebhookController {
    * Recebe webhooks de status RCS da Pontaltech
    * Os webhooks são adicionados a uma fila para processamento assíncrono
    */
-  @Post('rcs')
+  @Post(['rcs', 'rcs/:token'])
+  @Public()
+  @UseGuards(ProviderWebhookGuard)
   @ApiOperation({ summary: 'Recebe webhooks de status RCS da Pontaltech' })
   @ApiBody({
     required: true,

@@ -260,50 +260,57 @@ export class BroadcastProcessor extends WorkerHost {
       job.data;
     const sentAt = new Date();
     let messageId: string | null = accepted.messageId ?? null;
+    const data = {
+      campaignId,
+      recipientId,
+      templateId: templateData?.id || templateName,
+      externalId: accepted.externalId,
+      phoneNumber: recipientPhone,
+      status: 'SENT' as MessageStatus,
+      sentAt,
+      metadata: accepted.metadata || {},
+    };
 
-    if (!messageId) {
-      const data = {
-        campaignId,
-        recipientId,
-        templateId: templateData?.id || templateName,
-        externalId: accepted.externalId,
-        phoneNumber: recipientPhone,
-        status: 'SENT' as MessageStatus,
-        sentAt,
-        metadata: accepted.metadata || {},
-      };
-      try {
-        const message = accepted.externalId
-          ? await this.prisma.message.upsert({
-              where: { externalId: accepted.externalId },
-              create: data,
-              update: {},
-            })
-          : await this.prisma.message.create({ data });
-        messageId = message.id;
-      } catch (error) {
-        this.logger.error(
-          `ACEITE SEM REGISTRO: provedor aceitou (externalId=${accepted.externalId ?? 'n/d'}) ` +
-            `para recipient ${recipientId} da campanha ${campaignId}, mas a Message nao foi gravada: ` +
-            `${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-
+    // Message e recipient na MESMA transacao: o webhook do provedor acha a
+    // Message pelo externalId e mexe no recipient (delivered/read/sent). Se a
+    // Message ficasse visivel antes do recipient virar SENT, o webhook o levaria
+    // a DELIVERED, o update condicional afetaria 0 linhas e ninguem contaria o
+    // envio — a campanha nunca fecharia. Com a transacao, o webhook so enxerga a
+    // Message depois do commit, com o recipient ja SENT e contado aqui.
     let transitioned = false;
     try {
-      const { count } = await this.prisma.campaignRecipient.updateMany({
-        where: {
-          id: recipientId,
-          status: { notIn: accepted.blocked ?? FINAL_RECIPIENT_STATUSES },
-        },
-        data: { status: 'SENT', sentAt },
-      });
-      transitioned = count === 1;
+      const outcome = await this.retryPersistence(() =>
+        this.prisma.$transaction(async (tx) => {
+          let id = accepted.messageId ?? null;
+          if (!id) {
+            const message = accepted.externalId
+              ? await tx.message.upsert({
+                  where: { externalId: accepted.externalId },
+                  create: data,
+                  update: {},
+                })
+              : await tx.message.create({ data });
+            id = message.id;
+          }
+          const { count } = await tx.campaignRecipient.updateMany({
+            where: {
+              id: recipientId,
+              status: { notIn: accepted.blocked ?? FINAL_RECIPIENT_STATUSES },
+            },
+            data: { status: 'SENT', sentAt },
+          });
+          return { id, transitioned: count === 1 };
+        }),
+      );
+      messageId = outcome.id;
+      transitioned = outcome.transitioned;
     } catch (error) {
+      // Nem Message nem recipient foram gravados (rollback): nao ha registro do
+      // aceite. Nao relanca (o retry reenviaria); o recipient fica QUEUED.
       this.logger.error(
-        `ACEITE SEM REGISTRO: recipient ${recipientId} (externalId=${accepted.externalId ?? 'n/d'}) ` +
-          `nao foi marcado SENT: ${error instanceof Error ? error.message : String(error)}`,
+        `ACEITE SEM REGISTRO: provedor aceitou (externalId=${accepted.externalId ?? 'n/d'}) ` +
+          `para recipient ${recipientId} da campanha ${campaignId}, mas a gravacao falhou: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
       );
     }
 
@@ -342,6 +349,22 @@ export class BroadcastProcessor extends WorkerHost {
       externalId: accepted.externalId,
       ...(accepted.reconciled ? { reconciled: true } : {}),
     };
+  }
+
+  /**
+   * Repete uma escrita curta no banco (erro transitorio de conexao/pool) antes
+   * de desistir: 3 tentativas, com 100ms e 500ms entre elas.
+   */
+  private async retryPersistence<T>(fn: () => Promise<T>): Promise<T> {
+    const delays = [100, 500];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await fn();
+      } catch (error) {
+        if (attempt >= delays.length) throw error;
+        await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+      }
+    }
   }
 
   /**
@@ -467,26 +490,32 @@ export class BroadcastProcessor extends WorkerHost {
 
     let transitioned = false;
     try {
-      const { count } = await this.prisma.campaignRecipient.updateMany({
-        where: { id: recipientId, status: { notIn: blocked } },
-        data: {
-          status: 'FAILED',
-          metadata: {
-            ...failureMetadata,
-            error: errorMessage,
-            errorCode,
-            failedAt: new Date(),
-            attemptNumber: job.attemptsMade,
-            finalFailure: true,
+      const { count } = await this.retryPersistence(() =>
+        this.prisma.campaignRecipient.updateMany({
+          where: { id: recipientId, status: { notIn: blocked } },
+          data: {
+            status: 'FAILED',
+            metadata: {
+              ...failureMetadata,
+              error: errorMessage,
+              errorCode,
+              failedAt: new Date(),
+              attemptNumber: job.attemptsMade,
+              finalFailure: true,
+            },
           },
-        },
-      });
+        }),
+      );
       transitioned = count === 1;
     } catch (persistError) {
+      // O provedor NAO aceitou: relancar e seguro (o retry pode reenviar sem
+      // risco de duplicata). Concluir o job aqui deixaria o recipient QUEUED sem
+      // contar e a campanha sem fechar.
       this.logger.error(
-        `Erro ao marcar recipient ${recipientId} como FAILED: ` +
+        `Erro ao marcar recipient ${recipientId} como FAILED — relancando para retry: ` +
           `${persistError instanceof Error ? persistError.message : String(persistError)}`,
       );
+      throw error;
     }
 
     // So conta a falha (e avisa o CRM) se ESTE job tirou o recipient do estado

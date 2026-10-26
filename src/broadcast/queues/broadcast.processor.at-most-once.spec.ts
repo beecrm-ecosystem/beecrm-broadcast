@@ -42,7 +42,14 @@ function applyData(row: any, data: Record<string, any>) {
   }
 }
 
-function makeWorld(opts: { totalRecipients?: number; recipients?: string[] } = {}) {
+function makeWorld(
+  opts: {
+    totalRecipients?: number;
+    recipients?: string[];
+    /** Webhook do provedor que roda assim que a Message fica visivel (commit). */
+    onMessageVisible?: (message: any) => void;
+  } = {},
+) {
   const campaign: CampaignRow = {
     id: 'camp-1',
     status: 'PROCESSING',
@@ -62,6 +69,14 @@ function makeWorld(opts: { totalRecipients?: number; recipients?: string[] } = {
   }
   const messages: any[] = [];
   let seq = 0;
+  // Transacao simulada: Message criada dentro dela so fica visivel ao webhook
+  // no commit; fora dela, na hora (como o Postgres em READ COMMITTED).
+  let inTx = false;
+  const pendingVisible: any[] = [];
+  const becameVisible = (row: any) => {
+    if (inTx) pendingVisible.push(row);
+    else opts.onMessageVisible?.(row);
+  };
 
   const prisma: any = {
     campaign: {
@@ -79,14 +94,21 @@ function makeWorld(opts: { totalRecipients?: number; recipients?: string[] } = {
       }),
     },
     campaignRecipient: {
-      findUnique: jest.fn(async ({ where }: any) => {
+      findUnique: jest.fn(async ({ where, select }: any) => {
         const r = recipients.get(where.id);
         if (!r) return null;
         return {
           status: r.status,
           metadata: r.metadata ?? null,
+          // Honra o filtro do select (externalId: { not: null }) como o Prisma.
           messages: messages
-            .filter((m) => m.recipientId === r.id && m.externalId)
+            .filter((m) => m.recipientId === r.id)
+            .filter((m) => {
+              const filter = select?.messages?.where?.externalId;
+              // Coluna ausente = NULL no banco.
+              if (filter && 'not' in filter && filter.not === null) return m.externalId != null;
+              return true;
+            })
             .slice(0, 1)
             .map((m) => ({ id: m.id, externalId: m.externalId })),
         };
@@ -111,6 +133,7 @@ function makeWorld(opts: { totalRecipients?: number; recipients?: string[] } = {
         }
         const row = { id: `msg-${++seq}`, ...data };
         messages.push(row);
+        if (row.externalId) becameVisible(row);
         return row;
       }),
       upsert: jest.fn(async ({ where, create }: any) => {
@@ -118,10 +141,21 @@ function makeWorld(opts: { totalRecipients?: number; recipients?: string[] } = {
         if (existing) return existing;
         const row = { id: `msg-${++seq}`, ...create };
         messages.push(row);
+        becameVisible(row);
         return row;
       }),
     },
   };
+  // Sem rollback (os testes que falham na transacao falham antes de gravar).
+  prisma.$transaction = jest.fn(async (fn: (tx: any) => Promise<any>) => {
+    inTx = true;
+    try {
+      return await fn(prisma);
+    } finally {
+      inTx = false;
+      pendingVisible.splice(0).forEach((row) => opts.onMessageVisible?.(row));
+    }
+  });
 
   const dispatcher = {
     channel: 'whatsapp',
@@ -236,6 +270,60 @@ describe('BC-01 — no maximo um envio por destinatario', () => {
     expect(phonesSent).toEqual(['5500000000001', '5500000000002']);
     expect(w.campaign.sentCount).toBe(2);
     expect(w.campaign.status).toBe('COMPLETED');
+  });
+
+  it('counts the send exactly once when the provider webhook lands right after the Message is written', async () => {
+    // Webhook "delivered" (Meta, webhook.service.ts:220) ou messages.upsert do
+    // Diogenes: acha a Message pelo externalId e leva o recipient a DELIVERED.
+    // Nao soma sentCount (a Message ja estava SENT) — so deliveredCount.
+    let w!: ReturnType<typeof makeWorld>;
+    w = makeWorld({
+      totalRecipients: 1,
+      recipients: ['rcp-A'],
+      onMessageVisible: (message) => {
+        message.status = 'DELIVERED';
+        w.recipients.get(message.recipientId)!.status = 'DELIVERED';
+        w.campaign.deliveredCount += 1;
+      },
+    });
+
+    await run(w.processor, makeJob('rcp-A', '5500000000001', 0));
+
+    expect(w.campaign.sentCount).toBe(1);
+    expect(w.campaign.status).toBe('COMPLETED');
+    expect(w.recipients.get('rcp-A')!.status).toBe('DELIVERED');
+    expect(w.sentResults()).toHaveLength(1);
+  });
+
+  it('a failed acceptance write leaves no Message behind and is not resent nor counted twice', async () => {
+    const w = makeWorld({ totalRecipients: 5 });
+    // Banco fora nas 3 tentativas da transacao.
+    w.prisma.$transaction.mockRejectedValue(new Error('ECONNREFUSED (db)'));
+
+    const result = await run(w.processor, makeJob('rcp-A', '5500000000001', 0));
+
+    expect(result).toMatchObject({ success: true });
+    expect(w.prisma.$transaction).toHaveBeenCalledTimes(3);
+    expect(w.dispatcher.sendMessage).toHaveBeenCalledTimes(1);
+    expect(w.recipients.get('rcp-A')!.status).toBe('QUEUED');
+    expect(w.campaign.sentCount).toBe(0);
+  });
+
+  it('rethrows for a retry when the final FAILED cannot be written, instead of leaving it uncounted', async () => {
+    const w = makeWorld({ totalRecipients: 5 });
+    const permanent: any = new Error('Request failed with status code 400');
+    permanent.response = { status: 400 };
+    w.dispatcher.sendMessage.mockRejectedValue(permanent);
+    w.prisma.campaignRecipient.updateMany.mockRejectedValue(new Error('ECONNREFUSED (db)'));
+
+    const pending = w.processor.process(makeJob('rcp-A', '5500000000001', 0));
+    const assertion = expect(pending).rejects.toBe(permanent);
+    await jest.advanceTimersByTimeAsync(6000);
+    await assertion;
+
+    expect(w.prisma.campaignRecipient.updateMany).toHaveBeenCalledTimes(3);
+    expect(w.campaign.failedCount).toBe(0);
+    expect(w.dlq.add).not.toHaveBeenCalled();
   });
 
   it('reconciles an accepted message whose recipient was left QUEUED without calling the provider', async () => {

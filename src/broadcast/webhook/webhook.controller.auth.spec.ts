@@ -218,6 +218,36 @@ describe('WebhookController — autenticidade dos webhooks de provedor', () => {
         .send(metaPayload)
         .expect(201);
     });
+
+    it.each(['diogenes', 'rcs'])(
+      'a valid Meta signature does not open %s (only campaign-status accepts it)',
+      async (route) => {
+        process.env.PROVIDER_WEBHOOK_TOKEN = TOKEN;
+
+        await http()
+          .post(`/api/webhook/${route}`)
+          .set('Content-Type', 'application/json')
+          .set('X-Hub-Signature-256', sign(rawBody))
+          .send(rawBody)
+          .expect(401);
+
+        expect(queue.addDiogenesWebhook).not.toHaveBeenCalled();
+        expect(queue.addRcsWebhook).not.toHaveBeenCalled();
+      },
+    );
+
+    it('positive control: the same signed body with both envs opens campaign-status', async () => {
+      process.env.PROVIDER_WEBHOOK_TOKEN = TOKEN;
+
+      await http()
+        .post('/api/webhook/campaign-status')
+        .set('Content-Type', 'application/json')
+        .set('X-Hub-Signature-256', sign(rawBody))
+        .send(rawBody)
+        .expect(201);
+
+      expect(queue.addMetaWebhook).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('rollout: sem env, comportamento atual + aviso', () => {

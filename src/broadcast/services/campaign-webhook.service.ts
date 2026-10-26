@@ -41,6 +41,15 @@ export interface MessageResultItem {
   status: string;
   sentAt: string | null;
   errorMessage: string | null;
+  /**
+   * Codigo do erro em item FAILED: o codigo da Meta como string numerica
+   * ("131026", "132015") quando a falha veio da Meta; senao o status HTTP
+   * ("500"); null quando nao ha nenhum dos dois. O CRM decide freio
+   * (CampaignKillSwitch) e contencao (CampaignFallbackService) por este campo
+   * e normaliza com ctype_digit — por isso string de digitos, nunca 'UNKNOWN'.
+   * Em item SENT e sempre null.
+   */
+  errorCode: string | null;
 }
 
 export interface BroadcastMessageSummary {

@@ -10,6 +10,7 @@ import {
 import { json, urlencoded } from 'express';
 import { AllExceptionsFilter } from './broadcast/filters/http-exception.filter';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { registerGracefulShutdown } from './shutdown';
 
 async function bootstrap() {
   // Define nível de log baseado no ambiente
@@ -18,7 +19,8 @@ async function bootstrap() {
       ? ['error', 'warn', 'log']
       : ['error', 'warn', 'log', 'debug', 'verbose'];
 
-  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+  // BC-10: a API nao carrega os @Processor (ver AppModule.forApi).
+  const app = await NestFactory.create<NestExpressApplication>(AppModule.forApi(), {
     logger: logLevels,
     // Desabilita o body-parser default (limite 100KB) para reconfigurar com limite maior abaixo.
     // Campanhas rotation enviam lotes de contatos com o template embutido por contato (metadata.templateOverride),
@@ -26,6 +28,7 @@ async function bootstrap() {
     bodyParser: false,
   });
   const logger = new Logger('Bootstrap');
+  registerGracefulShutdown(app, logger);
 
   // Webhooks de provedor: corpo cru para conferir a assinatura da Meta (ver ProviderWebhookGuard).
   app.use(PROVIDER_WEBHOOK_PATH, providerWebhookBodyParser());

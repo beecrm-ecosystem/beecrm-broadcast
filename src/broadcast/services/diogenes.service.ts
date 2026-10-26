@@ -49,17 +49,24 @@ export interface DiogenesResponse {
   source: string;
 }
 
+interface BreakerState {
+  state: 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+  failures: number;
+  nextRetryAt: number;
+  /** Ultimo motivo que contou para o breaker: meta=NNN ou http=NNN. */
+  lastReason?: string;
+}
+
 @Injectable()
 export class DiogenesService {
   private readonly logger = new Logger(DiogenesService.name);
   private readonly baseUrl = process.env.DIOGENES_URL || 'https://diogenes.beecrm.io';
   private readonly apiKey = process.env.HERMES_API_KEY;
   private readonly isTestMode = process.env.DIOGENES_TEST_MODE === 'true';
-  private readonly breaker = {
-    state: 'CLOSED' as 'CLOSED' | 'OPEN' | 'HALF_OPEN',
-    failures: 0,
-    nextRetryAt: 0,
-  };
+  // Um breaker por canal (BC-04): rate limit da Meta e por numero emissor, e
+  // um breaker unico por processo fazia o 130429 de um tenant bloquear o envio
+  // de todos os outros canais naquele processo.
+  private readonly breakers = new Map<string, BreakerState>();
   private readonly MAX_FAILURES_BEFORE_OPEN = 3;
 
   constructor(private readonly httpService: HttpService) {}
@@ -70,10 +77,16 @@ export class DiogenesService {
   async sendTemplate(channel: string, data: SendTemplateDto): Promise<DiogenesResponse> {
     const url = `${this.baseUrl}/message/sendTemplate/${channel}`;
 
-    // Circuit breaker: bloqueia chamadas durante cooldown
-    if (this.isCircuitOpen()) {
-      const waitMs = Math.max(0, this.breaker.nextRetryAt - Date.now());
-      throw new Error(`Circuit breaker aberto para Diogenes. Aguarde ${waitMs}ms`);
+    // Circuit breaker do canal: bloqueia chamadas durante cooldown
+    const breaker = this.breakerFor(channel);
+    if (this.isCircuitOpen(breaker)) {
+      const waitMs = Math.max(0, breaker.nextRetryAt - Date.now());
+      // O motivo (meta=NNN / http=NNN) vai na mensagem: quem esgota os adiamentos
+      // com o breaker aberto leva esse codigo ao CRM.
+      throw new Error(
+        `Circuit breaker aberto para Diogenes (${channel}; ${breaker.lastReason ?? 'n/d'}). ` +
+          `Aguarde ${waitMs}ms`,
+      );
     }
 
     try {
@@ -117,8 +130,8 @@ export class DiogenesService {
 
       this.logger.log(`Mensagem enviada com sucesso. ID: ${payload.key.id}`);
 
-      // Sucesso fecha o circuito
-      this.resetBreaker();
+      // Sucesso fecha o circuito do canal
+      this.breakers.delete(channel);
 
       // Anexa o HTTP status code ao payload para rastreamento
       (payload as any).httpStatusCode = httpStatusCode;
@@ -131,7 +144,7 @@ export class DiogenesService {
       // backpressure pelo `policy` em vez do status HTTP.
       if (isMetaApiError(error)) {
         if (error.policy === 'rate_limit') {
-          this.tripBreakerForRateLimit(error.metaCode);
+          this.tripBreakerForRateLimit(breaker, error.metaCode);
           this.logger.warn(
             `Rate limit Meta #${error.metaCode}: pausando enfileiramento (fbtrace_id=${error.fbtraceId ?? 'n/a'})`,
           );
@@ -150,16 +163,18 @@ export class DiogenesService {
       }
 
       const status = error.response?.status as number | undefined;
-      const backoffMs = this.recordBreakerFailure(status, error.response?.headers);
+      const backoffMs = this.recordBreakerFailure(breaker, status, error.response?.headers);
       if (backoffMs > 0) {
         this.logger.warn(`Backoff adaptativo de ${backoffMs}ms após status ${status ?? 'N/A'}`);
         await this.delay(backoffMs);
       }
 
-      // Backpressure: sinaliza pausa do enfileiramento em caso de 429/5xx
-      if (status === 429 || (status !== undefined && status >= 500)) {
-        this.logger.warn('Sugerindo pausa do enfileiramento devido a erros 429/5xx.');
-        throw new Error('BACKPRESSURE: pause enqueue');
+      // Backpressure (adiar sem consumir tentativa) so no 429: o pedido foi
+      // recusado antes de sair. 5xx e ambiguo — o Diogenes pode ter repassado a
+      // Meta antes de falhar — entao segue como erro comum e consome attempts.
+      if (status === 429) {
+        this.logger.warn('Sugerindo pausa do enfileiramento devido a 429.');
+        throw new Error('BACKPRESSURE: pause enqueue (http=429)');
       }
 
       throw error;
@@ -409,11 +424,20 @@ export class DiogenesService {
     return str || '-';
   }
 
-  private isCircuitOpen(): boolean {
-    if (this.breaker.state === 'OPEN') {
+  private breakerFor(channel: string): BreakerState {
+    let breaker = this.breakers.get(channel);
+    if (!breaker) {
+      breaker = { state: 'CLOSED', failures: 0, nextRetryAt: 0 };
+      this.breakers.set(channel, breaker);
+    }
+    return breaker;
+  }
+
+  private isCircuitOpen(breaker: BreakerState): boolean {
+    if (breaker.state === 'OPEN') {
       const now = Date.now();
-      if (now >= this.breaker.nextRetryAt) {
-        this.breaker.state = 'HALF_OPEN';
+      if (now >= breaker.nextRetryAt) {
+        breaker.state = 'HALF_OPEN';
         return false;
       }
       return true;
@@ -421,42 +445,42 @@ export class DiogenesService {
     return false;
   }
 
-  private resetBreaker() {
-    this.breaker.state = 'CLOSED';
-    this.breaker.failures = 0;
-    this.breaker.nextRetryAt = 0;
-  }
-
   /**
    * Abre o circuit breaker imediatamente quando a Meta sinaliza rate
    * limit (130429 etc). O cooldown cresce a cada disparo consecutivo
    * para dar tempo do throughput voltar ao normal: 60s, 120s, 300s.
    */
-  private tripBreakerForRateLimit(metaCode: number) {
-    this.breaker.failures += 1;
+  private tripBreakerForRateLimit(breaker: BreakerState, metaCode: number) {
+    breaker.failures += 1;
+    breaker.lastReason = `meta=${metaCode}`;
     const ladder = [60_000, 120_000, 300_000];
-    const cooldown = ladder[Math.min(this.breaker.failures - 1, ladder.length - 1)];
-    this.breaker.state = 'OPEN';
-    this.breaker.nextRetryAt = Date.now() + cooldown;
+    const cooldown = ladder[Math.min(breaker.failures - 1, ladder.length - 1)];
+    breaker.state = 'OPEN';
+    breaker.nextRetryAt = Date.now() + cooldown;
     this.logger.warn(
-      `Circuit breaker aberto por ${cooldown}ms após Meta #${metaCode} (failures=${this.breaker.failures})`,
+      `Circuit breaker aberto por ${cooldown}ms após Meta #${metaCode} (failures=${breaker.failures})`,
     );
   }
 
-  private recordBreakerFailure(status?: number, headers?: Record<string, any>): number {
+  private recordBreakerFailure(
+    breaker: BreakerState,
+    status?: number,
+    headers?: Record<string, any>,
+  ): number {
     const shouldTrip = status === 429 || (status !== undefined && status >= 500);
     if (!shouldTrip) {
       return 0;
     }
 
-    this.breaker.failures += 1;
+    breaker.failures += 1;
+    breaker.lastReason = `http=${status}`;
 
-    const backoffMs = this.computeBackoffMs(status, headers, this.breaker.failures);
+    const backoffMs = this.computeBackoffMs(status, headers, breaker.failures);
 
-    if (this.breaker.failures >= this.MAX_FAILURES_BEFORE_OPEN) {
+    if (breaker.failures >= this.MAX_FAILURES_BEFORE_OPEN) {
       const cooldown = Math.min(60000, backoffMs * 2 || 5000);
-      this.breaker.state = 'OPEN';
-      this.breaker.nextRetryAt = Date.now() + cooldown;
+      breaker.state = 'OPEN';
+      breaker.nextRetryAt = Date.now() + cooldown;
       this.logger.warn(`Circuit breaker aberto por ${cooldown}ms após status ${status}`);
     }
 

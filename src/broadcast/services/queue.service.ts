@@ -244,6 +244,21 @@ export class QueueService {
   }
 
   /**
+   * BC-04: o codigo nao pausa mais a fila inteira, mas uma pausa gravada no
+   * Redis pelo mecanismo antigo (queue.pause() + setTimeout em memoria) fica
+   * para sempre se o processo que pausou morreu. Chamado no boot do worker e
+   * pela rota POST /api/queue/resume.
+   */
+  async resumeIfPaused(): Promise<{ wasPaused: boolean }> {
+    const wasPaused = await this.broadcastQueue.isPaused();
+    if (wasPaused) {
+      this.logger.warn('broadcast-queue estava pausada no Redis — retomando');
+      await this.broadcastQueue.resume();
+    }
+    return { wasPaused };
+  }
+
+  /**
    * Limpa jobs completados
    */
   async cleanQueue() {

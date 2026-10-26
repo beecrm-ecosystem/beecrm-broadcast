@@ -1,5 +1,6 @@
 import { Injectable, NestMiddleware, Logger } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
+import { redactHeaders, redactParams, redactWebhookUrl } from '../webhook/webhook-log-redaction';
 
 @Injectable()
 export class LoggerMiddleware implements NestMiddleware {
@@ -7,7 +8,9 @@ export class LoggerMiddleware implements NestMiddleware {
   private isProduction = process.env.NODE_ENV === 'production';
 
   use(req: Request, res: Response, next: NextFunction) {
-    const { method, originalUrl, body, query, params } = req;
+    const { method, body, query, params } = req;
+    // Token de webhook de provedor (segmento de URL / header) nunca vai para o log.
+    const originalUrl = redactWebhookUrl(req.originalUrl);
     const startTime = Date.now();
 
     // Em produção, apenas loga detalhes em debug
@@ -20,7 +23,7 @@ export class LoggerMiddleware implements NestMiddleware {
       // Em desenvolvimento, loga tudo
       this.logger.log('========== REQUISIÇÃO RECEBIDA ==========');
       this.logger.log(`${method} ${originalUrl}`);
-      this.logger.log(`Headers: ${JSON.stringify(req.headers, null, 2)}`);
+      this.logger.log(`Headers: ${JSON.stringify(redactHeaders(req.headers), null, 2)}`);
 
       if (body && Object.keys(body).length > 0) {
         this.logger.log(`Body: ${JSON.stringify(body, null, 2)}`);
@@ -31,7 +34,7 @@ export class LoggerMiddleware implements NestMiddleware {
       }
 
       if (params && Object.keys(params).length > 0) {
-        this.logger.log(`Params: ${JSON.stringify(params)}`);
+        this.logger.log(`Params: ${JSON.stringify(redactParams(params))}`);
       }
     }
 

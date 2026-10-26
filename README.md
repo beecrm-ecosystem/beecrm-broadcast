@@ -110,15 +110,21 @@ yarn prisma:seed
 ### 5. Iniciar a aplicação
 
 ```bash
-# Modo desenvolvimento
-yarn start:dev
+# Modo desenvolvimento (API e consumo das filas no mesmo processo)
+BROADCAST_API_CONSUMES_QUEUES=true yarn start:dev
 
 # Modo produção
 yarn build
-yarn start:prod
+yarn start:prod          # só a API (dist/src/main.js)
+node dist/src/worker.js  # consumidores das filas
 ```
 
 A aplicação estará disponível em `http://localhost:3000`
+
+> **A API não consome as filas.** O `main.ts` sobe sem nenhum `@Processor`
+> (`AppModule.forApi()`); quem envia as mensagens é o `worker.ts`. Em
+> desenvolvimento, sem `BROADCAST_API_CONSUMES_QUEUES=true` (ou um
+> `node dist/src/worker.js` ao lado), nada sai da fila.
 
 ## 🔗 Webhook do Meta (WhatsApp)
 

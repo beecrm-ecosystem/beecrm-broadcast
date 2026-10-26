@@ -59,6 +59,30 @@ const FINAL_EXCEPT_FAILED = FINAL_RECIPIENT_STATUSES.filter((s) => s !== 'FAILED
  * `job.data`; esgotado, o destinatario vira FAILED com motivo (nunca some).
  */
 export const MAX_BACKPRESSURE_DEFERRALS = 30;
+
+/**
+ * Erros em que o envio comprovadamente nao saiu: rate limit da Meta (o Diogenes
+ * manda `BACKPRESSURE ... meta=NNN`), HTTP 429 (`http=429`) ou breaker aberto
+ * (nem chamou o provedor). Um BACKPRESSURE sem um desses marcadores nao adia.
+ */
+export function isProvenNotSent(message: string): boolean {
+  if (message.startsWith('Circuit breaker aberto')) return true;
+  return message.startsWith('BACKPRESSURE:') && /\b(meta=\d+|http=429)\b/.test(message);
+}
+
+/**
+ * Codigo da falha de quem esgotou os adiamentos, no formato que o CRM le:
+ * o da Meta (meta=130429); 429 sem codigo da Meta vira 130429 ("Cloud API rate
+ * limit"), para o freio por ritmo do CRM contar; breaker aberto por 5xx leva o
+ * status HTTP.
+ */
+export function backpressureErrorCode(message: string): string {
+  const meta = /\bmeta=(\d+)/.exec(message)?.[1];
+  if (meta) return meta;
+  const http = /\bhttp=(\d+)/.exec(message)?.[1];
+  if (http === '429') return '130429';
+  return http ?? 'BACKPRESSURE';
+}
 const BACKPRESSURE_DEFAULT_DELAY_MS = 60_000;
 const BACKPRESSURE_MIN_DELAY_MS = 5_000;
 const BACKPRESSURE_JITTER_MS = 5_000;
@@ -419,11 +443,12 @@ export class BroadcastProcessor extends WorkerHost {
       job.data;
     this.logger.error(`Erro ao processar envio para ${recipientPhone}: ${error.message}`);
 
-    // Rate limit da Meta (BACKPRESSURE) ou circuit breaker aberto do canal: o
-    // provedor nao aceitou. Adia SO este job (nao consome attempts, nao pausa a
-    // fila). Esgotado o limite de adiamentos, cai na falha final com motivo.
+    // Rate limit da Meta, HTTP 429 ou circuit breaker aberto do canal: o provedor
+    // comprovadamente NAO aceitou. So esses adiam o job sem consumir attempts
+    // (nao pausa a fila). 5xx e ambiguo (pode ter saido) e segue pelas attempts.
+    // Esgotado o limite de adiamentos, cai na falha final com motivo.
     const msg = typeof error.message === 'string' ? error.message : '';
-    const backpressure = msg.startsWith('BACKPRESSURE:') || msg.startsWith('Circuit breaker aberto');
+    const backpressure = isProvenNotSent(msg);
     if (backpressure) {
       const deferrals = (job.data.backpressureDeferrals ?? 0) + 1;
       if (deferrals <= MAX_BACKPRESSURE_DEFERRALS) {
@@ -455,11 +480,11 @@ export class BroadcastProcessor extends WorkerHost {
 
     const httpStatusCode =
       metaError?.httpStatusCode ?? error.response?.status ?? 'UNKNOWN';
-    // No BACKPRESSURE de rate limit o codigo da Meta vem na mensagem (meta=130429).
-    const backpressureMetaCode = backpressure ? /meta=(\d+)/.exec(msg)?.[1] : undefined;
     const errorCode = metaError
       ? String(metaError.metaCode)
-      : backpressureMetaCode ?? (backpressure ? 'BACKPRESSURE' : String(httpStatusCode));
+      : backpressure
+        ? backpressureErrorCode(msg)
+        : String(httpStatusCode);
     const errorMessage = backpressure
       ? `Limite de envio do canal persistiu apos ${MAX_BACKPRESSURE_DEFERRALS} adiamentos: ${msg}`
       : (metaError?.metaMessage ?? error.message);

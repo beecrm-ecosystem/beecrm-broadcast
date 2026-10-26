@@ -53,6 +53,8 @@ interface BreakerState {
   state: 'CLOSED' | 'OPEN' | 'HALF_OPEN';
   failures: number;
   nextRetryAt: number;
+  /** Ultimo motivo que contou para o breaker: meta=NNN ou http=NNN. */
+  lastReason?: string;
 }
 
 @Injectable()
@@ -79,7 +81,12 @@ export class DiogenesService {
     const breaker = this.breakerFor(channel);
     if (this.isCircuitOpen(breaker)) {
       const waitMs = Math.max(0, breaker.nextRetryAt - Date.now());
-      throw new Error(`Circuit breaker aberto para Diogenes (${channel}). Aguarde ${waitMs}ms`);
+      // O motivo (meta=NNN / http=NNN) vai na mensagem: quem esgota os adiamentos
+      // com o breaker aberto leva esse codigo ao CRM.
+      throw new Error(
+        `Circuit breaker aberto para Diogenes (${channel}; ${breaker.lastReason ?? 'n/d'}). ` +
+          `Aguarde ${waitMs}ms`,
+      );
     }
 
     try {
@@ -162,10 +169,12 @@ export class DiogenesService {
         await this.delay(backoffMs);
       }
 
-      // Backpressure: sinaliza pausa do enfileiramento em caso de 429/5xx
-      if (status === 429 || (status !== undefined && status >= 500)) {
-        this.logger.warn('Sugerindo pausa do enfileiramento devido a erros 429/5xx.');
-        throw new Error('BACKPRESSURE: pause enqueue');
+      // Backpressure (adiar sem consumir tentativa) so no 429: o pedido foi
+      // recusado antes de sair. 5xx e ambiguo — o Diogenes pode ter repassado a
+      // Meta antes de falhar — entao segue como erro comum e consome attempts.
+      if (status === 429) {
+        this.logger.warn('Sugerindo pausa do enfileiramento devido a 429.');
+        throw new Error('BACKPRESSURE: pause enqueue (http=429)');
       }
 
       throw error;
@@ -443,6 +452,7 @@ export class DiogenesService {
    */
   private tripBreakerForRateLimit(breaker: BreakerState, metaCode: number) {
     breaker.failures += 1;
+    breaker.lastReason = `meta=${metaCode}`;
     const ladder = [60_000, 120_000, 300_000];
     const cooldown = ladder[Math.min(breaker.failures - 1, ladder.length - 1)];
     breaker.state = 'OPEN';
@@ -463,6 +473,7 @@ export class DiogenesService {
     }
 
     breaker.failures += 1;
+    breaker.lastReason = `http=${status}`;
 
     const backoffMs = this.computeBackoffMs(status, headers, breaker.failures);
 

@@ -8,7 +8,7 @@
 import 'reflect-metadata';
 import { Logger } from '@nestjs/common';
 import { DelayedError } from 'bullmq';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import {
   BroadcastProcessor,
   MAX_BACKPRESSURE_DEFERRALS,
@@ -75,6 +75,7 @@ function makeWorld(campaignOverrides: Record<string, any> = {}) {
       }),
     },
   };
+  prisma.$transaction = jest.fn(async (fn: (tx: any) => Promise<any>) => fn(prisma));
   const dispatcher = {
     sendMessage: jest.fn(async (job: SendMessageJob) => ({
       success: true,
@@ -155,7 +156,9 @@ describe('BC-04 — backpressure por job/canal, sem pausa global', () => {
   it('uses the wait announced by the open channel breaker', async () => {
     const w = makeWorld();
     w.dispatcher.sendMessage.mockRejectedValueOnce(
-      new Error('Circuit breaker aberto para Diogenes (7-tenant.example). Aguarde 180000ms'),
+      new Error(
+        'Circuit breaker aberto para Diogenes (7-tenant.example; meta=130429). Aguarde 180000ms',
+      ),
     );
     const job = makeJob('rcp-A');
     const before = Date.now();
@@ -185,6 +188,52 @@ describe('BC-04 — backpressure por job/canal, sem pausa global', () => {
     expect(items).toEqual([
       expect.objectContaining({ status: 'FAILED', errorCode: '130429' }),
     ]);
+  });
+
+  it('exhausting the budget on an open breaker still sends a rate code to the CRM', async () => {
+    const w = makeWorld();
+    w.dispatcher.sendMessage.mockRejectedValueOnce(
+      new Error('Circuit breaker aberto para Diogenes (7-tenant.example; http=429). Aguarde 5000ms'),
+    );
+    const job = makeJob('rcp-A', { deferrals: MAX_BACKPRESSURE_DEFERRALS });
+
+    await w.processor.process(job, 'tok');
+
+    const items = w.webhook.sendMessageResults.mock.calls.flatMap((c: any[]) => c[1]);
+    // 429 sem codigo da Meta vira 130429, que o CampaignErrorPolicy trata como ritmo.
+    expect(items).toEqual([expect.objectContaining({ status: 'FAILED', errorCode: '130429' })]);
+  });
+
+  it('an ambiguous 5xx is not deferred: it consumes attempts like any temporary error', async () => {
+    const w = makeWorld();
+    const gateway: any = new Error('Request failed with status code 502');
+    gateway.response = { status: 502 };
+    w.dispatcher.sendMessage.mockRejectedValue(gateway);
+
+    const first = makeJob('rcp-A', { attemptsMade: 0 });
+    await expect(w.processor.process(first, 'tok')).rejects.toBe(gateway);
+    expect(first.moveToDelayed).not.toHaveBeenCalled();
+    expect(first.updateData).not.toHaveBeenCalled();
+
+    // Na ultima das 3 attempts vira falha final: no maximo 3 envios, nao 31.
+    const last = makeJob('rcp-A', { attemptsMade: 2 });
+    await expect(w.processor.process(last, 'tok')).resolves.toMatchObject({ success: false });
+    expect(last.moveToDelayed).not.toHaveBeenCalled();
+    expect(w.recipients.get('rcp-A').status).toBe('FAILED');
+    expect(w.dlq.add).toHaveBeenCalledWith(
+      'failed-message',
+      expect.objectContaining({ errorCode: '502' }),
+      expect.anything(),
+    );
+  });
+
+  it('a BACKPRESSURE without proof that nothing was sent is not deferred', async () => {
+    const w = makeWorld();
+    w.dispatcher.sendMessage.mockRejectedValueOnce(new Error('BACKPRESSURE: pause enqueue'));
+    const job = makeJob('rcp-A');
+
+    await expect(w.processor.process(job, 'tok')).rejects.toThrow('BACKPRESSURE');
+    expect(job.moveToDelayed).not.toHaveBeenCalled();
   });
 
   it('the processor has no handle to pause the shared queue', () => {
@@ -244,6 +293,79 @@ describe('BC-04 — breaker do Diogenes por canal', () => {
       /^Circuit breaker aberto/,
     );
     expect(http.post).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('BC-04 — Diogenes: o que adia e o que consome attempts', () => {
+  const payload: any = { number: '5500000000001', name: 'tpl', language: 'pt_BR' };
+  const httpError = (status: number) =>
+    Object.assign(new Error(`Request failed with status code ${status}`), {
+      response: { status, data: {}, headers: {} },
+    });
+
+  function makeDiogenes(http: any) {
+    const diogenes = new DiogenesService(http);
+    (diogenes as any).delay = jest.fn(async () => undefined); // backoff adaptativo
+    return diogenes;
+  }
+
+  it('5xx is rethrown as is (ambiguous), 429 becomes BACKPRESSURE with http=429', async () => {
+    const http: any = {
+      post: jest
+        .fn()
+        .mockReturnValueOnce(throwError(() => httpError(502)))
+        .mockReturnValueOnce(throwError(() => httpError(429))),
+    };
+    const diogenes = makeDiogenes(http);
+
+    const gateway = await diogenes.sendTemplate('1-a', payload).catch((e) => e);
+    expect(gateway.message).not.toMatch(/BACKPRESSURE/);
+    expect(gateway.response.status).toBe(502);
+
+    await expect(diogenes.sendTemplate('2-b', payload)).rejects.toThrow(
+      'BACKPRESSURE: pause enqueue (http=429)',
+    );
+  });
+
+  it('the open breaker names the Meta code that opened it', async () => {
+    const http: any = {
+      post: jest.fn().mockReturnValue(of({ data: { code: 130429, message: 'Rate' }, status: 200 })),
+    };
+    const diogenes = makeDiogenes(http);
+
+    await expect(diogenes.sendTemplate('1-a', payload)).rejects.toThrow('meta=130429');
+    await expect(diogenes.sendTemplate('1-a', payload)).rejects.toThrow(
+      /^Circuit breaker aberto para Diogenes \(1-a; meta=130429\)/,
+    );
+  });
+
+  it('a success closes the channel breaker (the cooldown ladder starts over)', async () => {
+    let now = 1_000_000;
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const rateLimited = of({ data: { code: 130429, message: 'Rate' }, status: 200 });
+      const http: any = {
+        post: jest
+          .fn()
+          .mockReturnValueOnce(rateLimited)
+          .mockReturnValueOnce(of({ data: { key: { id: 'wamid.ok' } }, status: 200 }))
+          .mockReturnValueOnce(rateLimited),
+      };
+      const diogenes = makeDiogenes(http);
+
+      await expect(diogenes.sendTemplate('1-a', payload)).rejects.toThrow('BACKPRESSURE');
+      now += 61_000; // passou o cooldown de 60s: HALF_OPEN
+      await expect(diogenes.sendTemplate('1-a', payload)).resolves.toMatchObject({
+        key: { id: 'wamid.ok' },
+      });
+      await expect(diogenes.sendTemplate('1-a', payload)).rejects.toThrow('BACKPRESSURE');
+
+      // Breaker fechado pelo sucesso: o novo disparo recomeca em 60s (sem o
+      // sucesso, seria o 2o degrau, 120s).
+      await expect(diogenes.sendTemplate('1-a', payload)).rejects.toThrow('Aguarde 60000ms');
+    } finally {
+      clock.mockRestore();
+    }
   });
 });
 

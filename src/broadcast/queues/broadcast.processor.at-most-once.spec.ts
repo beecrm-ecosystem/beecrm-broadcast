@@ -138,16 +138,11 @@ function makeWorld(opts: { totalRecipients?: number; recipients?: string[] } = {
     sendMessageResults: jest.fn(async () => undefined),
   };
   const dlq: any = { add: jest.fn(async () => undefined) };
-  const queueService: any = {
-    pauseQueue: jest.fn(async () => undefined),
-    resumeQueue: jest.fn(async () => undefined),
-  };
   const processor = new BroadcastProcessor(
     prisma,
     { getDispatcher: jest.fn(() => dispatcher) } as any,
     webhook,
     dlq,
-    queueService,
   );
 
   const sentResults = () =>

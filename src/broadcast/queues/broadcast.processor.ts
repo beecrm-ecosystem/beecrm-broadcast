@@ -1,6 +1,6 @@
 import { InjectQueue, Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
-import { Job } from 'bullmq';
+import { DelayedError, Job } from 'bullmq';
 import { MessageStatus } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { ChannelDispatcherFactory } from '../services/channel-dispatcher.factory';
@@ -11,7 +11,6 @@ import {
 } from '../services/campaign-webhook.service';
 import { Queue } from 'bullmq';
 import { isMetaApiError, MetaApiError } from '../services/meta-error';
-import { QueueService } from '../services/queue.service';
 import { DispatchResult } from '../services/channel-dispatcher.interface';
 
 /**
@@ -53,6 +52,17 @@ function isLegacyIntermediateFailure(
 
 const FINAL_EXCEPT_FAILED = FINAL_RECIPIENT_STATUSES.filter((s) => s !== 'FAILED');
 
+/**
+ * BC-04: rate limit/breaker do canal adia SO o job daquele canal (moveToDelayed
+ * com o token do worker + DelayedError), sem consumir `attempts` e sem pausar a
+ * fila dos outros tenants. O limite de adiamentos e contado a parte, no
+ * `job.data`; esgotado, o destinatario vira FAILED com motivo (nunca some).
+ */
+export const MAX_BACKPRESSURE_DEFERRALS = 30;
+const BACKPRESSURE_DEFAULT_DELAY_MS = 60_000;
+const BACKPRESSURE_MIN_DELAY_MS = 5_000;
+const BACKPRESSURE_JITTER_MS = 5_000;
+
 export interface SendMessageJob {
   campaignId: string;
   recipientId: string;
@@ -63,6 +73,8 @@ export interface SendMessageJob {
   channel: string;
   templateName: string;
   templateLanguage: string;
+  /** Quantas vezes o job foi adiado por rate limit/breaker do canal (BC-04). */
+  backpressureDeferrals?: number;
 }
 
 interface DeadLetterJob {
@@ -95,21 +107,16 @@ export class BroadcastProcessor extends WorkerHost {
     { items: MessageResultItem[]; firstBuffered: number }
   >();
 
-  // Garante que só uma rotina de pause+resume está agendada por vez,
-  // mesmo que vários jobs em paralelo recebam BACKPRESSURE simultaneamente.
-  private backpressureUntil = 0;
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly dispatcherFactory: ChannelDispatcherFactory,
     private readonly campaignWebhookService: CampaignWebhookService,
     @InjectQueue('broadcast-dlq') private readonly dlq: Queue<DeadLetterJob>,
-    private readonly queueService: QueueService,
   ) {
     super();
   }
 
-  async process(job: Job<SendMessageJob>): Promise<any> {
+  async process(job: Job<SendMessageJob>, token?: string): Promise<any> {
     const {
       campaignId,
       recipientId,
@@ -143,8 +150,7 @@ export class BroadcastProcessor extends WorkerHost {
     if (campaignState.status === 'PAUSED') {
       const delayMs = 60000; // re-checa em 1min; retoma sozinho quando voltar a PROCESSING
       this.logger.log(`⏸️ Campanha ${campaignId} pausada — reagendando job em ${delayMs / 1000}s`);
-      await job.moveToDelayed(Date.now() + delayMs);
-      return { success: false, reason: 'campaign_paused', rescheduled: true };
+      return this.delayJob(job, token, Date.now() + delayMs);
     }
 
     // Verificar time window antes de processar
@@ -157,8 +163,7 @@ export class BroadcastProcessor extends WorkerHost {
         `⏰ Fora da janela ${timeWindowCheck.window?.startTime}-${timeWindowCheck.window?.endTime}. ` +
           `Reagendando em ${Math.round((timeWindowCheck.delayMs || 0) / 60000)}min`,
       );
-      await job.moveToDelayed(Date.now() + (timeWindowCheck.delayMs || 60000));
-      return { success: false, reason: 'outside_time_window', rescheduled: true };
+      return this.delayJob(job, token, Date.now() + (timeWindowCheck.delayMs || 60000));
     }
 
     this.logger.log(
@@ -227,7 +232,7 @@ export class BroadcastProcessor extends WorkerHost {
       // Envia via dispatcher (WhatsApp → Diogenes, RCS → Pontaltech)
       result = await dispatcher.sendMessage(job.data);
     } catch (error) {
-      return this.handleSendFailure(job, error, blocked);
+      return this.handleSendFailure(job, error, blocked, token);
     }
 
     // Daqui em diante o provedor ACEITOU: nenhum erro pode virar FAILED nem
@@ -385,18 +390,26 @@ export class BroadcastProcessor extends WorkerHost {
     job: Job<SendMessageJob>,
     error: any,
     blocked: MessageStatus[] = FINAL_RECIPIENT_STATUSES,
+    token?: string,
   ): Promise<any> {
     const { campaignId, recipientId, recipientPhone, recipientName, templateData, templateName } =
       job.data;
     this.logger.error(`Erro ao processar envio para ${recipientPhone}: ${error.message}`);
 
-    // Rate limit da Meta (BACKPRESSURE) ou circuit breaker aberto:
-    // não persiste falha no BD, pausa a fila por alguns segundos e
-    // relança para o BullMQ retentar quando voltar.
+    // Rate limit da Meta (BACKPRESSURE) ou circuit breaker aberto do canal: o
+    // provedor nao aceitou. Adia SO este job (nao consome attempts, nao pausa a
+    // fila). Esgotado o limite de adiamentos, cai na falha final com motivo.
     const msg = typeof error.message === 'string' ? error.message : '';
-    if (msg.startsWith('BACKPRESSURE:') || msg.startsWith('Circuit breaker aberto')) {
-      await this.applyBackpressure();
-      throw error;
+    const backpressure = msg.startsWith('BACKPRESSURE:') || msg.startsWith('Circuit breaker aberto');
+    if (backpressure) {
+      const deferrals = (job.data.backpressureDeferrals ?? 0) + 1;
+      if (deferrals <= MAX_BACKPRESSURE_DEFERRALS) {
+        return this.deferForBackpressure(job, token, deferrals, msg);
+      }
+      this.logger.error(
+        `Backpressure do canal ${job.data.channel} persistiu por ${deferrals - 1} adiamentos — ` +
+          `recipient ${recipientId} marcado como falha`,
+      );
     }
 
     const metaError = isMetaApiError(error) ? (error as MetaApiError) : null;
@@ -405,19 +418,28 @@ export class BroadcastProcessor extends WorkerHost {
     const isPermanentByHttp =
       error.response?.status && [400, 401, 403, 404, 422].includes(error.response.status);
     const isPermanentByMeta = metaError?.policy === 'permanent';
-    const isPermanentError = Boolean(isPermanentByHttp || isPermanentByMeta);
+    // Backpressure esgotado tambem e final: relancar so consumiria attempts.
+    const isPermanentError = Boolean(isPermanentByHttp || isPermanentByMeta || backpressure);
 
     if (isPermanentError) {
       const reason = metaError
         ? `Meta #${metaError.metaCode}`
-        : `HTTP ${error.response.status}`;
+        : backpressure
+          ? 'backpressure esgotado'
+          : `HTTP ${error.response.status}`;
       this.logger.error(`Erro permanente (${reason}) - não será feito retry`);
     }
 
     const httpStatusCode =
       metaError?.httpStatusCode ?? error.response?.status ?? 'UNKNOWN';
-    const errorCode = metaError ? String(metaError.metaCode) : String(httpStatusCode);
-    const errorMessage = metaError?.metaMessage ?? error.message;
+    // No BACKPRESSURE de rate limit o codigo da Meta vem na mensagem (meta=130429).
+    const backpressureMetaCode = backpressure ? /meta=(\d+)/.exec(msg)?.[1] : undefined;
+    const errorCode = metaError
+      ? String(metaError.metaCode)
+      : backpressureMetaCode ?? (backpressure ? 'BACKPRESSURE' : String(httpStatusCode));
+    const errorMessage = backpressure
+      ? `Limite de envio do canal persistiu apos ${MAX_BACKPRESSURE_DEFERRALS} adiamentos: ${msg}`
+      : (metaError?.metaMessage ?? error.message);
     // Codigo que viaja no messageResults: o CRM so reconhece string de
     // digitos (ctype_digit), entao o 'UNKNOWN' de falha sem HTTP vira null.
     const resultErrorCode = /^\d+$/.test(errorCode) ? errorCode : null;
@@ -885,40 +907,44 @@ export class BroadcastProcessor extends WorkerHost {
   }
 
   /**
-   * Pausa a broadcast-queue por ~60s e agenda um resume. Se vários jobs
-   * paralelos entrarem em backpressure no mesmo período, só a primeira
-   * pausa agenda o resume (os demais reaproveitam a janela existente).
+   * Re-atrasa o job e sinaliza ao BullMQ com DelayedError (BC-11): o worker nao
+   * tenta completar um job que ja saiu de `active`. O token e o do worker que
+   * tem o lock; sem ele o BullMQ usa "0" e o lock nao e liberado.
    */
-  private async applyBackpressure(cooldownMs = 60_000): Promise<void> {
-    const now = Date.now();
-    if (now < this.backpressureUntil) {
-      return;
-    }
-    this.backpressureUntil = now + cooldownMs;
+  private async delayJob(
+    job: Job<SendMessageJob>,
+    token: string | undefined,
+    timestamp: number,
+  ): Promise<never> {
+    await job.moveToDelayed(timestamp, token);
+    throw new DelayedError();
+  }
 
-    try {
-      await this.queueService.pauseQueue();
-      this.logger.warn(`Backpressure: fila pausada por ${cooldownMs}ms`);
-    } catch (err) {
-      this.logger.error(
-        `Falha ao pausar fila para backpressure: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      this.backpressureUntil = 0;
-      return;
-    }
+  /**
+   * BC-04: adia so este job (canal com rate limit/breaker aberto). O tempo vem
+   * do proprio breaker ("Aguarde Nms") ou do padrao de 60s, com jitter para os
+   * jobs do canal nao voltarem todos no mesmo instante. Nao ha pausa global nem
+   * timer em memoria: o atraso vive no Redis, junto do job.
+   */
+  private async deferForBackpressure(
+    job: Job<SendMessageJob>,
+    token: string | undefined,
+    deferrals: number,
+    reason: string,
+  ): Promise<never> {
+    const waitMatch = /Aguarde (\d+)ms/.exec(reason);
+    const baseDelay = waitMatch ? Number(waitMatch[1]) : BACKPRESSURE_DEFAULT_DELAY_MS;
+    const delayMs =
+      Math.max(baseDelay, BACKPRESSURE_MIN_DELAY_MS) +
+      Math.floor(Math.random() * BACKPRESSURE_JITTER_MS);
 
-    setTimeout(async () => {
-      try {
-        await this.queueService.resumeQueue();
-        this.logger.log('Backpressure: fila retomada');
-      } catch (err) {
-        this.logger.error(
-          `Falha ao retomar fila após backpressure: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      } finally {
-        this.backpressureUntil = 0;
-      }
-    }, cooldownMs).unref?.();
+    this.logger.warn(
+      `Backpressure no canal ${job.data.channel}: job ${job.id} adiado ${delayMs}ms ` +
+        `(${deferrals}/${MAX_BACKPRESSURE_DEFERRALS}) — ${reason}`,
+    );
+
+    await job.updateData({ ...job.data, backpressureDeferrals: deferrals });
+    return this.delayJob(job, token, Date.now() + delayMs);
   }
 
   private async pushToDlq(job: {

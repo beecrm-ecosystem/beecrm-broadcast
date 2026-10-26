@@ -1,4 +1,4 @@
-import { Module, NestModule, MiddlewareConsumer } from '@nestjs/common';
+import { DynamicModule, Module, NestModule, MiddlewareConsumer, Provider } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { HttpModule } from '@nestjs/axios';
 import { HttpModuleOptions } from '@nestjs/axios/dist/interfaces/http-module.interface';
@@ -33,6 +33,19 @@ import { WhatsAppDispatcher } from './services/dispatchers/whatsapp.dispatcher';
 import { RcsDispatcher } from './services/dispatchers/rcs.dispatcher';
 import { ChannelDispatcherFactory } from './services/channel-dispatcher.factory';
 import { redisProvider } from './redis.provider';
+
+/**
+ * Consumidores das filas (cada um vira um Worker do BullMQ ao subir o modulo).
+ * BC-10: so o processo de worker os carrega; a API so enfileira.
+ */
+export const QUEUE_CONSUMERS: Provider[] = [
+  BroadcastProcessor,
+  ImportContactsProcessor,
+  WebhookProcessor,
+  DlqProcessor,
+  CampaignSchedulerProcessor,
+  CampaignMonitorProcessor,
+];
 
 @Module({
   imports: [
@@ -86,17 +99,11 @@ import { redisProvider } from './redis.provider';
     MetricsService,
     FileParserService,
     ImportService,
-    BroadcastProcessor,
-    ImportContactsProcessor,
-    WebhookProcessor,
-    DlqProcessor,
     WebhookService,
     WebhookQueueService,
     FileLoggerService,
     CampaignSchedulerService,
-    CampaignSchedulerProcessor,
     CampaignMonitorService,
-    CampaignMonitorProcessor,
     WhatsAppDispatcher,
     RcsDispatcher,
     ChannelDispatcherFactory,
@@ -105,6 +112,17 @@ import { redisProvider } from './redis.provider';
   exports: [BroadcastService, QueueService, ImportService, MetricsService, WebhookQueueService],
 })
 export class BroadcastModule implements NestModule {
+  /**
+   * `consumers: true` registra os @Processor (processo de worker); `false`
+   * sobe so API e produtores (processo HTTP).
+   */
+  static register(options: { consumers: boolean }): DynamicModule {
+    return {
+      module: BroadcastModule,
+      providers: options.consumers ? QUEUE_CONSUMERS : [],
+    };
+  }
+
   configure(consumer: MiddlewareConsumer) {
     consumer.apply(LoggerMiddleware).forRoutes('*');
   }

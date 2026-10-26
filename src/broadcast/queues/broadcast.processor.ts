@@ -12,6 +12,53 @@ import {
 import { Queue } from 'bullmq';
 import { isMetaApiError, MetaApiError } from '../services/meta-error';
 import { QueueService } from '../services/queue.service';
+import { DispatchResult } from '../services/channel-dispatcher.interface';
+
+/**
+ * Estados em que o destinatario ja foi resolvido: o provedor aceitou (SENT e
+ * seguintes) ou a falha final ja foi contada. Job que encontra o recipient num
+ * destes estados nao envia de novo (BC-01).
+ */
+const FINAL_RECIPIENT_STATUSES: MessageStatus[] = [
+  'SENT',
+  'DELIVERED',
+  'READ',
+  'FAILED',
+  'REJECTED',
+];
+
+/**
+ * Compatibilidade de deploy: o codigo anterior gravava o recipient FAILED ja
+ * na tentativa intermediaria (antes do retry) e so contava a falha na ultima.
+ * Um retry em voo na hora do deploy encontraria esse FAILED "provisorio" e, se
+ * fosse descartado, o destinatario nao seria contado e a campanha nunca
+ * fecharia. A falha final deste codigo leva `finalFailure: true`; FAILED sem a
+ * marca, gravado pelo catch antigo (attemptNumber de uma tentativa anterior a
+ * deste retry), e tratado como pendente. FAILED do webhook do provedor nao tem
+ * attemptNumber e continua bloqueando.
+ */
+function isLegacyIntermediateFailure(
+  status: MessageStatus,
+  metadata: unknown,
+  attemptsMade: number,
+): boolean {
+  if (status !== 'FAILED' || attemptsMade <= 0) return false;
+  const meta = metadata && typeof metadata === 'object' ? (metadata as Record<string, any>) : {};
+  return (
+    meta.finalFailure !== true &&
+    typeof meta.attemptNumber === 'number' &&
+    meta.attemptNumber < attemptsMade
+  );
+}
+
+/**
+ * Transacao do aceite: o maxWait padrao do Prisma (2s para obter conexao)
+ * estoura com 100 jobs por processo disputando o pool e vira "ACEITE SEM
+ * REGISTRO". 10s para conseguir a conexao e 10s para os 2 comandos.
+ */
+const ACCEPTANCE_TX_OPTIONS = { maxWait: 10_000, timeout: 10_000 };
+
+const FINAL_EXCEPT_FAILED = FINAL_RECIPIENT_STATUSES.filter((s) => s !== 'FAILED');
 
 export interface SendMessageJob {
   campaignId: string;
@@ -125,50 +172,214 @@ export class BroadcastProcessor extends WorkerHost {
       `Processando envio para ${recipientName} (${recipientPhone}) - Campanha: ${campaignId}`,
     );
 
+    // BC-01: no maximo um envio por destinatario. Antes de chamar o provedor,
+    // rele o recipient: se ja saiu de QUEUED/PENDING (outro job, retry depois de
+    // aceite, requeue), nao envia de novo. Se ja existe Message com externalId,
+    // o provedor aceitou numa execucao anterior que caiu antes de marcar o
+    // recipient: conclui o registro sem reenviar.
+    const recipientState = await this.prisma.campaignRecipient.findUnique({
+      where: { id: recipientId },
+      select: {
+        status: true,
+        metadata: true,
+        messages: {
+          where: { externalId: { not: null } },
+          select: { id: true, externalId: true },
+          take: 1,
+        },
+      },
+    });
+    if (!recipientState) {
+      this.logger.warn(`⏭️ Destinatario ${recipientId} inexistente — job descartado (sem envio)`);
+      return { success: false, reason: 'recipient_not_found', skipped: true };
+    }
+    const legacyFailure = isLegacyIntermediateFailure(
+      recipientState.status,
+      recipientState.metadata,
+      job.attemptsMade,
+    );
+    // Estados que bloqueiam a transicao deste job (ver isLegacyIntermediateFailure).
+    const blocked = legacyFailure ? FINAL_EXCEPT_FAILED : FINAL_RECIPIENT_STATUSES;
+    if (legacyFailure) {
+      this.logger.warn(
+        `↩️ Recipient ${recipientId} em FAILED de tentativa intermediaria (codigo anterior) — ` +
+          `seguindo com o retry`,
+      );
+    }
+    if (blocked.includes(recipientState.status)) {
+      this.logger.warn(
+        `⏭️ Destinatario ${recipientId} ja em ${recipientState.status} — job descartado (sem reenvio)`,
+      );
+      return { success: false, reason: 'recipient_already_processed', skipped: true };
+    }
+    const [acceptedMessage] = recipientState.messages ?? [];
+    if (acceptedMessage) {
+      this.logger.warn(
+        `♻️ Destinatario ${recipientId} ja aceito pelo provedor (${acceptedMessage.externalId}) — ` +
+          `concluindo o registro sem reenviar`,
+      );
+      return this.recordAcceptedSend(job, {
+        externalId: acceptedMessage.externalId,
+        messageId: acceptedMessage.id,
+        reconciled: true,
+        blocked,
+      });
+    }
+
+    let result: DispatchResult;
     try {
       // Obtém o dispatcher adequado para o canal
       const dispatcher = this.dispatcherFactory.getDispatcher(channel);
 
       // Envia via dispatcher (WhatsApp → Diogenes, RCS → Pontaltech)
-      const result = await dispatcher.sendMessage(job.data);
+      result = await dispatcher.sendMessage(job.data);
+    } catch (error) {
+      return this.handleSendFailure(job, error, blocked);
+    }
 
-      // Salva a mensagem no banco com o ID retornado
-      const message = await this.prisma.message.create({
-        data: {
-          campaignId,
-          recipientId,
-          templateId: templateData.id || templateName,
-          externalId: result.externalId,
+    // Daqui em diante o provedor ACEITOU: nenhum erro pode virar FAILED nem
+    // relancar para o BullMQ (relancar = reenviar ao mesmo telefone).
+    return this.recordAcceptedSend(job, {
+      externalId: result.externalId ?? null,
+      metadata: result.metadata,
+      blocked,
+    });
+  }
+
+  /**
+   * Registra um envio aceito pelo provedor. Nunca lanca: cada passo falha
+   * sozinho e so loga. A Message e gravada por upsert no externalId (unico),
+   * o recipient so passa a SENT se ainda nao estava em estado final (update
+   * condicional) e o contador so soma quando essa transicao aconteceu — assim
+   * o mesmo destinatario nunca conta duas vezes em sent+failed.
+   */
+  private async recordAcceptedSend(
+    job: Job<SendMessageJob>,
+    accepted: {
+      externalId: string | null;
+      metadata?: Record<string, any>;
+      messageId?: string;
+      reconciled?: boolean;
+      blocked?: MessageStatus[];
+    },
+  ): Promise<any> {
+    const { campaignId, recipientId, recipientPhone, recipientName, templateData, templateName } =
+      job.data;
+    const sentAt = new Date();
+    let messageId: string | null = accepted.messageId ?? null;
+    const data = {
+      campaignId,
+      recipientId,
+      templateId: templateData?.id || templateName,
+      externalId: accepted.externalId,
+      phoneNumber: recipientPhone,
+      status: 'SENT' as MessageStatus,
+      sentAt,
+      metadata: accepted.metadata || {},
+    };
+
+    // Message e recipient na MESMA transacao: o webhook do provedor acha a
+    // Message pelo externalId e mexe no recipient (delivered/read/sent). Se a
+    // Message ficasse visivel antes do recipient virar SENT, o webhook o levaria
+    // a DELIVERED, o update condicional afetaria 0 linhas e ninguem contaria o
+    // envio — a campanha nunca fecharia. Com a transacao, o webhook so enxerga a
+    // Message depois do commit, com o recipient ja SENT e contado aqui.
+    let transitioned = false;
+    try {
+      const outcome = await this.retryPersistence(() =>
+        this.prisma.$transaction(async (tx) => {
+          let id = accepted.messageId ?? null;
+          if (!id) {
+            const message = accepted.externalId
+              ? await tx.message.upsert({
+                  where: { externalId: accepted.externalId },
+                  create: data,
+                  update: {},
+                })
+              : await tx.message.create({ data });
+            id = message.id;
+          }
+          const { count } = await tx.campaignRecipient.updateMany({
+            where: {
+              id: recipientId,
+              status: { notIn: accepted.blocked ?? FINAL_RECIPIENT_STATUSES },
+            },
+            data: { status: 'SENT', sentAt },
+          });
+          return { id, transitioned: count === 1 };
+        }, ACCEPTANCE_TX_OPTIONS),
+      );
+      messageId = outcome.id;
+      transitioned = outcome.transitioned;
+    } catch (error) {
+      // Nem Message nem recipient foram gravados (rollback): nao ha registro do
+      // aceite. Nao relanca (o retry reenviaria); o recipient fica QUEUED.
+      this.logger.error(
+        `ACEITE SEM REGISTRO: provedor aceitou (externalId=${accepted.externalId ?? 'n/d'}) ` +
+          `para recipient ${recipientId} da campanha ${campaignId}, mas a gravacao falhou: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    if (transitioned) {
+      try {
+        // Atualiza contadores da campanha com buffer (reduz writes)
+        await this.bufferCounters(campaignId, { sentDelta: 1 });
+
+        // Bufferiza resultado da mensagem para webhook em lote
+        await this.bufferMessageResult(campaignId, {
           phoneNumber: recipientPhone,
+          name: recipientName,
+          externalId: accepted.externalId ?? null,
           status: 'SENT',
-          sentAt: new Date(),
-          metadata: result.metadata || {},
-        },
-      });
+          sentAt: sentAt.toISOString(),
+          errorMessage: null,
+          errorCode: null,
+        });
+      } catch (error) {
+        this.logger.error(
+          `Erro ao contabilizar envio aceito do recipient ${recipientId}: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
 
-      // Atualiza o status do destinatário
-      await this.prisma.campaignRecipient.update({
-        where: { id: recipientId },
-        data: {
-          status: 'SENT',
-          sentAt: new Date(),
-        },
-      });
+    await this.afterRecipientSettled(campaignId);
 
-      // Atualiza contadores da campanha com buffer (reduz writes)
-      await this.bufferCounters(campaignId, { sentDelta: 1 });
+    this.logger.log(
+      `Mensagem enviada com sucesso! ID: ${messageId ?? 'n/d'} | External ID: ${accepted.externalId}`,
+    );
 
-      // Bufferiza resultado da mensagem para webhook em lote
-      await this.bufferMessageResult(campaignId, {
-        phoneNumber: recipientPhone,
-        name: recipientName,
-        externalId: result.externalId ?? null,
-        status: 'SENT',
-        sentAt: new Date().toISOString(),
-        errorMessage: null,
-        errorCode: null,
-      });
+    return {
+      success: true,
+      messageId,
+      externalId: accepted.externalId,
+      ...(accepted.reconciled ? { reconciled: true } : {}),
+    };
+  }
 
+  /**
+   * Repete uma escrita curta no banco (erro transitorio de conexao/pool) antes
+   * de desistir: 3 tentativas, com 100ms e 500ms entre elas.
+   */
+  private async retryPersistence<T>(fn: () => Promise<T>): Promise<T> {
+    const delays = [100, 500];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await fn();
+      } catch (error) {
+        if (attempt >= delays.length) throw error;
+        await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+      }
+    }
+  }
+
+  /**
+   * Progresso + conclusao depois que um destinatario terminou (aceito ou
+   * falha final). Erro aqui so loga: relancar faria o BullMQ repetir o job.
+   */
+  private async afterRecipientSettled(campaignId: string): Promise<void> {
+    try {
       // Envia webhook de progresso (throttled)
       const updatedCampaign = await this.prisma.campaign.findUnique({
         where: { id: campaignId },
@@ -176,71 +387,89 @@ export class BroadcastProcessor extends WorkerHost {
       if (updatedCampaign) {
         await this.sendProgressWebhook(updatedCampaign);
       }
+    } catch (error) {
+      this.logger.error(
+        `Erro ao enviar progresso da campanha ${campaignId}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
 
+    try {
       // Verifica se todos os destinatários foram processados
       await this.checkAndCompleteCampaign(campaignId);
-
-      this.logger.log(
-        `Mensagem enviada com sucesso! ID: ${message.id} | External ID: ${result.externalId}`,
-      );
-
-      return {
-        success: true,
-        messageId: message.id,
-        externalId: result.externalId,
-      };
     } catch (error) {
-      this.logger.error(`Erro ao processar envio para ${recipientPhone}: ${error.message}`);
+      this.logger.error(
+        `Erro ao verificar conclusao da campanha ${campaignId}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
 
-      // Rate limit da Meta (BACKPRESSURE) ou circuit breaker aberto:
-      // não persiste falha no BD, pausa a fila por alguns segundos e
-      // relança para o BullMQ retentar quando voltar.
-      const msg = typeof error.message === 'string' ? error.message : '';
-      if (msg.startsWith('BACKPRESSURE:') || msg.startsWith('Circuit breaker aberto')) {
-        await this.applyBackpressure();
-        throw error;
-      }
+  /**
+   * O provedor NAO aceitou (sendMessage lancou). Tentativa intermediaria:
+   * registra a tentativa e relanca para o retry, sem mexer no recipient. Falha
+   * final (permanente ou ultima tentativa): marca o recipient FAILED por update
+   * condicional e so entao conta a falha e manda o item ao CRM.
+   */
+  private async handleSendFailure(
+    job: Job<SendMessageJob>,
+    error: any,
+    blocked: MessageStatus[] = FINAL_RECIPIENT_STATUSES,
+  ): Promise<any> {
+    const { campaignId, recipientId, recipientPhone, recipientName, templateData, templateName } =
+      job.data;
+    this.logger.error(`Erro ao processar envio para ${recipientPhone}: ${error.message}`);
 
-      const metaError = isMetaApiError(error) ? (error as MetaApiError) : null;
+    // Rate limit da Meta (BACKPRESSURE) ou circuit breaker aberto:
+    // não persiste falha no BD, pausa a fila por alguns segundos e
+    // relança para o BullMQ retentar quando voltar.
+    const msg = typeof error.message === 'string' ? error.message : '';
+    if (msg.startsWith('BACKPRESSURE:') || msg.startsWith('Circuit breaker aberto')) {
+      await this.applyBackpressure();
+      throw error;
+    }
 
-      // Permanente: HTTP 4xx específico OU código Meta classificado como permanente.
-      const isPermanentByHttp =
-        error.response?.status && [400, 401, 403, 404, 422].includes(error.response.status);
-      const isPermanentByMeta = metaError?.policy === 'permanent';
-      const isPermanentError = Boolean(isPermanentByHttp || isPermanentByMeta);
+    const metaError = isMetaApiError(error) ? (error as MetaApiError) : null;
 
-      if (isPermanentError) {
-        const reason = metaError
-          ? `Meta #${metaError.metaCode}`
-          : `HTTP ${error.response.status}`;
-        this.logger.error(`Erro permanente (${reason}) - não será feito retry`);
-      }
+    // Permanente: HTTP 4xx específico OU código Meta classificado como permanente.
+    const isPermanentByHttp =
+      error.response?.status && [400, 401, 403, 404, 422].includes(error.response.status);
+    const isPermanentByMeta = metaError?.policy === 'permanent';
+    const isPermanentError = Boolean(isPermanentByHttp || isPermanentByMeta);
 
-      const httpStatusCode =
-        metaError?.httpStatusCode ?? error.response?.status ?? 'UNKNOWN';
-      const errorCode = metaError ? String(metaError.metaCode) : String(httpStatusCode);
-      const errorMessage = metaError?.metaMessage ?? error.message;
-      // Codigo que viaja no messageResults: o CRM so reconhece string de
-      // digitos (ctype_digit), entao o 'UNKNOWN' de falha sem HTTP vira null.
-      const resultErrorCode = /^\d+$/.test(errorCode) ? errorCode : null;
+    if (isPermanentError) {
+      const reason = metaError
+        ? `Meta #${metaError.metaCode}`
+        : `HTTP ${error.response.status}`;
+      this.logger.error(`Erro permanente (${reason}) - não será feito retry`);
+    }
 
-      const failureMetadata: Record<string, any> = {
-        httpStatusCode,
-      };
-      if (metaError) {
-        failureMetadata.metaCode = metaError.metaCode;
-        failureMetadata.metaMessage = metaError.metaMessage;
-        failureMetadata.metaDetails = metaError.metaDetails;
-        failureMetadata.metaPolicy = metaError.policy;
-        failureMetadata.fbtraceId = metaError.fbtraceId;
-      }
+    const httpStatusCode =
+      metaError?.httpStatusCode ?? error.response?.status ?? 'UNKNOWN';
+    const errorCode = metaError ? String(metaError.metaCode) : String(httpStatusCode);
+    const errorMessage = metaError?.metaMessage ?? error.message;
+    // Codigo que viaja no messageResults: o CRM so reconhece string de
+    // digitos (ctype_digit), entao o 'UNKNOWN' de falha sem HTTP vira null.
+    const resultErrorCode = /^\d+$/.test(errorCode) ? errorCode : null;
 
-      // Cria registro de mensagem com o erro
+    const failureMetadata: Record<string, any> = {
+      httpStatusCode,
+    };
+    if (metaError) {
+      failureMetadata.metaCode = metaError.metaCode;
+      failureMetadata.metaMessage = metaError.metaMessage;
+      failureMetadata.metaDetails = metaError.metaDetails;
+      failureMetadata.metaPolicy = metaError.policy;
+      failureMetadata.fbtraceId = metaError.fbtraceId;
+    }
+
+    // Registro da tentativa (historico; sem externalId, nao conta como aceite)
+    try {
       await this.prisma.message.create({
         data: {
           campaignId,
           recipientId,
-          templateId: templateData.id || templateName,
+          templateId: templateData?.id || templateName,
           phoneNumber: recipientPhone,
           status: 'FAILED',
           failedAt: new Date(),
@@ -249,28 +478,57 @@ export class BroadcastProcessor extends WorkerHost {
           metadata: failureMetadata,
         },
       });
+    } catch (persistError) {
+      this.logger.error(
+        `Erro ao registrar tentativa falha do recipient ${recipientId}: ` +
+          `${persistError instanceof Error ? persistError.message : String(persistError)}`,
+      );
+    }
 
-      // Marca como falha no banco
-      await this.prisma.campaignRecipient.update({
-        where: { id: recipientId },
-        data: {
-          status: 'FAILED',
-          metadata: {
-            ...failureMetadata,
-            error: errorMessage,
-            errorCode,
-            failedAt: new Date(),
-            attemptNumber: job.attemptsMade,
+    const attempts = job.opts.attempts ?? 1;
+    const isLastAttempt = job.attemptsMade + 1 >= attempts;
+
+    // Para erros temporários (500, timeout, etc) com tentativa sobrando: retry.
+    // O recipient continua QUEUED — FAILED so na falha final, senao o guard de
+    // idempotencia descartaria o proprio retry.
+    if (!isPermanentError && !isLastAttempt) {
+      throw error;
+    }
+
+    let transitioned = false;
+    try {
+      const { count } = await this.retryPersistence(() =>
+        this.prisma.campaignRecipient.updateMany({
+          where: { id: recipientId, status: { notIn: blocked } },
+          data: {
+            status: 'FAILED',
+            metadata: {
+              ...failureMetadata,
+              error: errorMessage,
+              errorCode,
+              failedAt: new Date(),
+              attemptNumber: job.attemptsMade,
+              finalFailure: true,
+            },
           },
-        },
-      });
+        }),
+      );
+      transitioned = count === 1;
+    } catch (persistError) {
+      // O provedor NAO aceitou: relancar e seguro (o retry pode reenviar sem
+      // risco de duplicata). Concluir o job aqui deixaria o recipient QUEUED sem
+      // contar e a campanha sem fechar.
+      this.logger.error(
+        `Erro ao marcar recipient ${recipientId} como FAILED — relancando para retry: ` +
+          `${persistError instanceof Error ? persistError.message : String(persistError)}`,
+      );
+      throw error;
+    }
 
-      const attempts = job.opts.attempts ?? 1;
-      const isLastAttempt = job.attemptsMade + 1 >= attempts;
-
-      // Só incrementa failedCount na última tentativa ou erro permanente
-      // para evitar double-counting em retries do BullMQ
-      if (isPermanentError || isLastAttempt) {
+    // So conta a falha (e avisa o CRM) se ESTE job tirou o recipient do estado
+    // pendente — evita contar duas vezes o mesmo destinatario.
+    if (transitioned) {
+      try {
         await this.bufferCounters(campaignId, { failedDelta: 1 });
 
         await this.bufferMessageResult(campaignId, {
@@ -282,44 +540,35 @@ export class BroadcastProcessor extends WorkerHost {
           errorMessage,
           errorCode: resultErrorCode,
         });
-      }
-
-      // Envia webhook de progresso (throttled)
-      const updatedCampaign = await this.prisma.campaign.findUnique({
-        where: { id: campaignId },
-      });
-      if (updatedCampaign) {
-        await this.sendProgressWebhook(updatedCampaign);
-      }
-
-      // Verifica se todos os destinatários foram processados
-      await this.checkAndCompleteCampaign(campaignId);
-
-      if (isPermanentError || isLastAttempt) {
-        this.logger.warn(
-          `Job marcado como concluído (${isPermanentError ? 'falha permanente' : 'última tentativa esgotada'})`,
+      } catch (countError) {
+        this.logger.error(
+          `Erro ao contabilizar falha do recipient ${recipientId}: ` +
+            `${countError instanceof Error ? countError.message : String(countError)}`,
         );
-
-        await this.pushToDlq({
-          campaignId,
-          recipientId,
-          phoneNumber: recipientPhone,
-          error: errorMessage,
-          errorCode,
-          attempts: job.attemptsMade + 1,
-          permanent: isPermanentError,
-        });
-
-        return {
-          success: false,
-          error: errorMessage,
-          permanent: isPermanentError,
-        };
       }
-
-      // Para erros temporários (500, timeout, etc), faz retry
-      throw error;
     }
+
+    await this.afterRecipientSettled(campaignId);
+
+    this.logger.warn(
+      `Job marcado como concluído (${isPermanentError ? 'falha permanente' : 'última tentativa esgotada'})`,
+    );
+
+    await this.pushToDlq({
+      campaignId,
+      recipientId,
+      phoneNumber: recipientPhone,
+      error: errorMessage,
+      errorCode,
+      attempts: job.attemptsMade + 1,
+      permanent: isPermanentError,
+    });
+
+    return {
+      success: false,
+      error: errorMessage,
+      permanent: isPermanentError,
+    };
   }
 
   /**
@@ -408,14 +657,23 @@ export class BroadcastProcessor extends WorkerHost {
 
     // Se todos os destinatários foram processados, marca como completada
     if (processedCount >= campaign.totalRecipients) {
-      this.logger.log(`🏁 Todos destinatários processados! Finalizando campanha ${campaignId}`);
-      await this.prisma.campaign.update({
-        where: { id: campaignId },
+      // BC-02: transicao condicional. Varios jobs (deste e de outros processos)
+      // podem chegar aqui juntos; so quem tirou a campanha de PROCESSING manda
+      // os webhooks finais.
+      const { count } = await this.prisma.campaign.updateMany({
+        where: { id: campaignId, status: 'PROCESSING' },
         data: {
           status: 'COMPLETED',
           completedAt: new Date(),
         },
       });
+      if (count !== 1) {
+        this.logger.debug(
+          `⏭️ Campanha ${campaignId} ja foi concluida por outro job — sem webhook final duplicado`,
+        );
+        return;
+      }
+      this.logger.log(`🏁 Todos destinatários processados! Finalizando campanha ${campaignId}`);
 
       // Limpa cache de progresso
       this.progressCache.delete(campaignId);

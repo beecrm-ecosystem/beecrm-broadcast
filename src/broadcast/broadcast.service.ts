@@ -16,7 +16,6 @@ import { CampaignSchedulerService } from './services/campaign-scheduler.service'
 @Injectable()
 export class BroadcastService {
   private readonly logger = new Logger(BroadcastService.name);
-  private readonly SAO_PAULO_OFFSET_MINUTES = -3 * 60;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -849,6 +848,22 @@ export class BroadcastService {
     return parsedDate;
   }
 
+  /**
+   * Converte a data de agendamento recebida no instante em que a campanha deve comecar.
+   *
+   * Regra (BC-05, auditoria de 26/10/2026):
+   * - Com fuso explicito (`Z`, `+00:00`, `-03:00`, `+0100`...) a string ja e um instante
+   *   absoluto e e respeitada como veio, sem nenhum deslocamento. E o que o CRM manda:
+   *   `startDate` como Carbon serializado em UTC (15:00 em Sao Paulo chega como
+   *   `2031-01-01T18:00:00.000000Z`) e, no PUT da janela de horario, `scheduledAt` via
+   *   `toIso8601String()` (`2031-01-01T15:00:00-03:00`).
+   * - Sem fuso (`2031-01-01T15:00:00` ou `2031-01-01 15:00:00`) a string e lida como hora
+   *   local de America/Sao_Paulo (convertToSaoPauloTime).
+   *
+   * Antes, `Z`/`+00:00` recebiam -3 h para compensar um CRM que rotulava hora local como
+   * UTC. O CRM foi corrigido em 26/09/2026 (d63fb07ab) e a compensacao passou a disparar a
+   * campanha 3 h antes e a recusar agendamento para menos de 3 h a frente. Nao reintroduzir.
+   */
   private parseScheduledDate(rawDate: string | Date): Date {
     if (rawDate instanceof Date) {
       return rawDate;
@@ -863,39 +878,17 @@ export class BroadcastService {
       throw new Error('Data de início inválida. Use um formato ISO 8601.');
     }
 
-    const lower = trimmed.toLowerCase();
-    const offsetMatch = trimmed.match(/([+-]\d{2}:?\d{2})$/);
+    const hasNumericOffset = /[+-]\d{2}:?\d{2}$/.test(trimmed);
+    const hasUtcDesignator = /z$/i.test(trimmed);
 
-    if (offsetMatch) {
-      const normalizedIso = this.normalizeIsoString(trimmed);
-      const parsed = new Date(normalizedIso);
+    if (hasNumericOffset || hasUtcDesignator) {
+      const parsed = new Date(hasNumericOffset ? this.normalizeIsoString(trimmed) : trimmed);
 
       if (Number.isNaN(parsed.getTime())) {
         throw new Error('Data de início inválida. Use um formato ISO 8601.');
-      }
-
-      const inputOffsetMinutes = this.parseOffsetMinutes(offsetMatch[1]);
-      if (inputOffsetMinutes === this.SAO_PAULO_OFFSET_MINUTES) {
-        return parsed;
-      }
-
-      if (inputOffsetMinutes === 0) {
-        const diffMinutes = this.SAO_PAULO_OFFSET_MINUTES;
-        return new Date(parsed.getTime() + diffMinutes * 60_000);
       }
 
       return parsed;
-    }
-
-    if (lower.endsWith('z')) {
-      const parsed = new Date(trimmed);
-
-      if (Number.isNaN(parsed.getTime())) {
-        throw new Error('Data de início inválida. Use um formato ISO 8601.');
-      }
-
-      const diffMinutes = this.SAO_PAULO_OFFSET_MINUTES - 0;
-      return new Date(parsed.getTime() + diffMinutes * 60_000);
     }
 
     return this.convertToSaoPauloTime(trimmed);
@@ -903,14 +896,6 @@ export class BroadcastService {
 
   private normalizeIsoString(value: string): string {
     return value.replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
-  }
-
-  private parseOffsetMinutes(offset: string): number {
-    const normalized = offset.replace(':', '');
-    const sign = normalized.startsWith('-') ? -1 : 1;
-    const hours = Number(normalized.slice(1, 3));
-    const minutes = Number(normalized.slice(3, 5));
-    return sign * (hours * 60 + minutes);
   }
 
   // Interprets the provided timestamp as America/Sao_Paulo local time and returns the UTC Date.

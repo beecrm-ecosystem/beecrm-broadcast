@@ -7,6 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
+import { redactParams, redactWebhookUrl } from '../webhook/webhook-log-redaction';
 
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
@@ -23,10 +24,12 @@ export class AllExceptionsFilter implements ExceptionFilter {
 
     // Log detalhado do erro
     this.logger.error('========== ERRO CAPTURADO ==========');
-    this.logger.error(`URL: ${request.method} ${request.url}`);
+    // Token de webhook de provedor no caminho/params nunca vai para o log nem para a resposta.
+    const url = redactWebhookUrl(request.url);
+    this.logger.error(`URL: ${request.method} ${url}`);
     this.logger.error(`Body: ${JSON.stringify(request.body, null, 2)}`);
     this.logger.error(`Query: ${JSON.stringify(request.query)}`);
-    this.logger.error(`Params: ${JSON.stringify(request.params)}`);
+    this.logger.error(`Params: ${JSON.stringify(redactParams(request.params))}`);
 
     if (exception instanceof HttpException) {
       status = exception.getStatus();
@@ -53,7 +56,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const errorResponse: any = {
       statusCode: status,
       timestamp: new Date().toISOString(),
-      path: request.url,
+      path: url,
       method: request.method,
       message,
     };

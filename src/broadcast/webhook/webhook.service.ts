@@ -73,6 +73,47 @@ interface MetaIncomingMessage {
 
 const ENGAGEMENT_WINDOW_SECONDS = 24 * 60 * 60; // 24 horas
 
+/**
+ * Ordem do ciclo de vida da mensagem (BC-06): o status so avanca, SENT < DELIVERED < READ.
+ * FAILED/REJECTED sao terminais e nao sobrescrevem DELIVERED/READ — o sinal de que chegou
+ * vence o aviso de falha. Antes, um "delivered" atrasado depois do READ regredia a mensagem e
+ * mexia nos contadores (readCount -1, deliveredCount +1).
+ */
+const STATUS_RANK: Record<MessageStatus, number> = {
+  PENDING: 0,
+  QUEUED: 1,
+  SENT: 2,
+  DELIVERED: 3,
+  READ: 4,
+  FAILED: 5,
+  REJECTED: 5,
+};
+
+const TERMINAL_FAILURE_STATUSES: ReadonlySet<MessageStatus> = new Set<MessageStatus>([
+  'FAILED',
+  'REJECTED',
+]);
+
+/** Status repetido, regressao e qualquer mudanca depois de falha terminal devolvem false. */
+export function canTransitionMessageStatus(
+  previous: MessageStatus | null | undefined,
+  next: MessageStatus,
+): boolean {
+  if (!previous) {
+    return true;
+  }
+
+  if (previous === next || TERMINAL_FAILURE_STATUSES.has(previous)) {
+    return false;
+  }
+
+  if (TERMINAL_FAILURE_STATUSES.has(next)) {
+    return previous !== 'DELIVERED' && previous !== 'READ';
+  }
+
+  return STATUS_RANK[next] > STATUS_RANK[previous];
+}
+
 @Injectable()
 export class WebhookService {
   private readonly logger = new Logger(WebhookService.name);
@@ -85,7 +126,6 @@ export class WebhookService {
   async processMetaWebhook(status: MetaStatusUpdate, metadata: MetaMetadata) {
     const messageId = status.id; // wamid.xxx
     const whatsappStatus = status.status;
-    const recipientPhone = status.recipient_id;
 
     // Busca a mensagem pelo whatsappMessageId
     const message = await this.prisma.message.findFirst({
@@ -99,28 +139,13 @@ export class WebhookService {
     });
 
     if (!message) {
-      // Tenta buscar pelo telefone do destinatário (fallback)
-      const messageByPhone = await this.findMessageByPhone(recipientPhone);
-      if (messageByPhone) {
-        // Salva o evento do webhook apenas quando a mensagem é encontrada
-        const webhookEvent = await this.prisma.webhookEvent.create({
-          data: {
-            provider: 'meta',
-            event: 'message_status',
-            eventType: `status.${whatsappStatus}`,
-            whatsappMessageId: messageId,
-            status: whatsappStatus,
-            timestamp: new Date(parseInt(status.timestamp) * 1000),
-            payload: { status, metadata } as any,
-            processed: false,
-          },
-        });
-
-        this.logger.log(
-          `📨 Webhook de campanha recebido (campaign=${messageByPhone.campaignId}, message=${messageByPhone.id}, status=${whatsappStatus})`,
-        );
-        await this.updateMessageStatus(messageByPhone, whatsappStatus, status, webhookEvent.id);
-      }
+      // Sem fallback por telefone (BC-06): ele casava por sufixo a mensagem mais recente do numero
+      // em QUALQUER campanha (de qualquer tenant) e aplicava o status nela. Status de wamid
+      // desconhecido fica so no log e e ignorado.
+      this.logger.warn(
+        `Status Meta para wamid desconhecido ignorado (wamid=${messageId}, status=${whatsappStatus}, ` +
+          `phone_number_id=${metadata?.phone_number_id ?? 'n/a'})`,
+      );
       return;
     }
 
@@ -164,8 +189,13 @@ export class WebhookService {
 
       const previousStatus = freshMessage.status as MessageStatus | undefined;
 
-      // Guard: ignora se o status é o mesmo
-      if (previousStatus === newStatus) return;
+      // Guard: status repetido, regressao (READ -> DELIVERED) ou mudanca depois de falha terminal
+      if (!canTransitionMessageStatus(previousStatus, newStatus)) {
+        this.logger.debug(
+          `Status ${newStatus} ignorado para a mensagem ${freshMessage.id} (atual=${previousStatus})`,
+        );
+        return;
+      }
 
       const messageUpdate: any = {
         status: newStatus,
@@ -197,10 +227,16 @@ export class WebhookService {
         }
       }
 
-      await tx.message.update({
-        where: { id: freshMessage.id },
+      // Escrita condicional ao status lido: se outro worker aplicou um evento entre a leitura e
+      // a escrita, nada e gravado e os contadores nao andam (evento repetido nao conta 2x).
+      const { count } = await tx.message.updateMany({
+        where: { id: freshMessage.id, status: freshMessage.status },
         data: messageUpdate,
       });
+
+      if (count === 0) {
+        return;
+      }
 
       if (message.recipientId) {
         const recipientUpdate: any = { status: newStatus };
@@ -223,8 +259,8 @@ export class WebhookService {
         });
       }
 
-      // Atualiza contadores fora da transaction (usa increment atômico)
-      await this.updateCampaignCounters(message.campaignId, newStatus, previousStatus);
+      // Contadores na MESMA transaction: se ela desfaz, eles tambem
+      await this.updateCampaignCounters(message.campaignId, newStatus, previousStatus, tx);
     });
 
     try {
@@ -296,13 +332,16 @@ export class WebhookService {
       });
     }
 
+    // Sem contexto, o telefone so correlaciona dentro do MESMO numero de envio
+    // (metadata.phone_number_id = campaign.phoneNumberId) e com igualdade exata. Antes casava
+    // por sufixo em qualquer campanha recente, de qualquer tenant (SEC-04/BC-06).
     if (!relatedMessage) {
-      relatedMessage = await this.findMessageByPhone(normalizedFrom);
+      relatedMessage = await this.findMessageByPhone(normalizedFrom, metadata?.phone_number_id);
     }
 
     let recipientRecord: any = relatedMessage?.recipient;
     if (!recipientRecord) {
-      recipientRecord = await this.findRecipientByPhone(normalizedFrom);
+      recipientRecord = await this.findRecipientByPhone(normalizedFrom, metadata?.phone_number_id);
     }
 
     const campaignId = relatedMessage?.campaignId ?? recipientRecord?.campaignId;
@@ -420,9 +459,16 @@ export class WebhookService {
 
     const previousStatus = message.status as MessageStatus | undefined;
 
-    // Atualiza a mensagem
-    await this.prisma.message.update({
-      where: { id: message.id },
+    if (!canTransitionMessageStatus(previousStatus, newStatus)) {
+      this.logger.debug(
+        `Status ${newStatus} ignorado para a mensagem ${message.id} (atual=${previousStatus})`,
+      );
+      return;
+    }
+
+    // Atualiza a mensagem — condicional ao status lido (evento concorrente nao conta 2x)
+    const { count } = await this.prisma.message.updateMany({
+      where: { id: message.id, status: message.status },
       data: {
         status: newStatus,
         ...(newStatus === 'DELIVERED' && { deliveredAt: new Date() }),
@@ -436,6 +482,10 @@ export class WebhookService {
         },
       },
     });
+
+    if (count === 0) {
+      return;
+    }
 
     // Atualiza o destinatário
     await this.prisma.campaignRecipient.update({
@@ -459,37 +509,28 @@ export class WebhookService {
   async processRcsWebhook(payload: RcsWebhookDto) {
     const rcsMessageId = payload.messageId;
     const rcsStatus = payload.status;
-    const recipientPhone = payload.phone;
 
-    if (!rcsMessageId && !recipientPhone) {
-      this.logger.warn('Webhook RCS recebido sem messageId nem phone - ignorando');
+    // Sem fallback por telefone (BC-06): so o id do provedor correlaciona.
+    if (!rcsMessageId) {
+      this.logger.warn('Webhook RCS recebido sem messageId - ignorando');
       return;
     }
 
     // Busca a mensagem pelo providerMessageId (campo generico) ou externalId
     let message: any = null;
 
-    if (rcsMessageId) {
-      message = await this.prisma.message.findFirst({
-        where: {
-          OR: [{ providerMessageId: rcsMessageId }, { externalId: rcsMessageId }],
-        },
-        include: {
-          campaign: true,
-          recipient: true,
-        },
-      });
-    }
-
-    // Fallback: busca pelo telefone do destinatario
-    if (!message && recipientPhone) {
-      message = await this.findMessageByPhone(recipientPhone);
-    }
+    message = await this.prisma.message.findFirst({
+      where: {
+        OR: [{ providerMessageId: rcsMessageId }, { externalId: rcsMessageId }],
+      },
+      include: {
+        campaign: true,
+        recipient: true,
+      },
+    });
 
     if (!message) {
-      this.logger.warn(
-        `Mensagem RCS nao encontrada (messageId=${rcsMessageId}, phone=${recipientPhone}) - ignorando`,
-      );
+      this.logger.warn(`Mensagem RCS nao encontrada (messageId=${rcsMessageId}) - ignorando`);
       return;
     }
 
@@ -524,7 +565,8 @@ export class WebhookService {
       if (!freshMessage) return;
 
       const prevStatus = freshMessage.status as MessageStatus | undefined;
-      if (prevStatus === newStatus) return; // duplicado — ignora
+      // duplicado, regressao ou mudanca depois de falha terminal — ignora
+      if (!canTransitionMessageStatus(prevStatus, newStatus)) return;
 
       const messageUpdate: any = {
         status: newStatus,
@@ -561,10 +603,14 @@ export class WebhookService {
         }
       }
 
-      await tx.message.update({
-        where: { id: freshMessage.id },
+      const { count } = await tx.message.updateMany({
+        where: { id: freshMessage.id, status: freshMessage.status },
         data: messageUpdate,
       });
+
+      if (count === 0) {
+        return;
+      }
 
       // Atualiza o destinatario
       if (message.recipientId) {
@@ -588,8 +634,8 @@ export class WebhookService {
         });
       }
 
-      // Contadores com increment atômico (usa this.prisma, igual ao path Meta)
-      await this.updateCampaignCounters(message.campaignId, newStatus, prevStatus);
+      // Contadores na mesma transaction (igual ao path Meta)
+      await this.updateCampaignCounters(message.campaignId, newStatus, prevStatus, tx);
     });
 
     // Marca o webhook como processado
@@ -681,10 +727,12 @@ export class WebhookService {
     campaignId: string,
     newStatus: MessageStatus,
     previousStatus?: MessageStatus,
+    client: { campaign: { update: (args: any) => Promise<unknown> } } = this.prisma,
   ) {
     const updateData: any = {};
 
-    if (previousStatus && previousStatus === newStatus) {
+    // Mesma regra da mensagem: repetido, regressao ou pos-falha terminal nao mexe em contador
+    if (!canTransitionMessageStatus(previousStatus, newStatus)) {
       return;
     }
 
@@ -736,7 +784,7 @@ export class WebhookService {
     }
 
     if (Object.keys(updateData).length > 0) {
-      await this.prisma.campaign.update({
+      await client.campaign.update({
         where: { id: campaignId },
         data: updateData,
       });
@@ -829,29 +877,41 @@ export class WebhookService {
     return null;
   }
 
-  private async findMessageByPhone(phone: string) {
+  /**
+   * Variantes exatas do telefone (com e sem DDI 55). Igualdade, nunca sufixo: `endsWith` com um
+   * `from` curto ("1") casava qualquer numero terminado em 1.
+   */
+  private phoneVariants(phone: string): string[] {
     const normalized = this.normalizePhoneNumber(phone);
     if (!normalized) {
-      return null;
+      return [];
     }
 
     const variants = new Set<string>([normalized]);
+    variants.add(normalized.startsWith('55') ? normalized.slice(2) : `55${normalized}`);
 
-    if (normalized.startsWith('55')) {
-      variants.add(normalized.slice(2));
+    return Array.from(variants);
+  }
+
+  /**
+   * Mensagem recente do telefone, SO entre campanhas do numero de envio do evento
+   * (`campaign.phoneNumberId`). Sem `phone_number_id` nao ha como saber o canal: devolve null
+   * em vez de casar com campanha de outro tenant.
+   */
+  private async findMessageByPhone(phone: string, phoneNumberId?: string | null) {
+    const variants = this.phoneVariants(phone);
+    if (variants.length === 0 || !phoneNumberId) {
+      return null;
     }
 
-    // Limita a campanhas recentes (últimas 72h) para evitar cross-campaign match
+    // Limita a campanhas recentes (últimas 72h)
     const recentCutoff = new Date(Date.now() - 72 * 60 * 60 * 1000);
 
     return this.prisma.message.findFirst({
       where: {
         createdAt: { gte: recentCutoff },
-        OR: Array.from(variants).map((value) => ({
-          phoneNumber: {
-            endsWith: value,
-          },
-        })),
+        phoneNumber: { in: variants },
+        campaign: { phoneNumberId },
       },
       include: {
         campaign: true,
@@ -863,26 +923,18 @@ export class WebhookService {
     });
   }
 
-  private async findRecipientByPhone(phone: string) {
-    const normalized = this.normalizePhoneNumber(phone);
-    if (!normalized) {
+  /** Destinatario ativo do telefone, com a mesma restricao de canal do findMessageByPhone. */
+  private async findRecipientByPhone(phone: string, phoneNumberId?: string | null) {
+    const variants = this.phoneVariants(phone);
+    if (variants.length === 0 || !phoneNumberId) {
       return null;
-    }
-
-    const variants = new Set<string>([normalized]);
-
-    if (normalized.startsWith('55')) {
-      variants.add(normalized.slice(2));
     }
 
     return this.prisma.campaignRecipient.findFirst({
       where: {
         isActive: true,
-        OR: Array.from(variants).map((value) => ({
-          phoneNumber: {
-            endsWith: value,
-          },
-        })),
+        phoneNumber: { in: variants },
+        campaign: { phoneNumberId },
       },
       include: {
         campaign: true,
